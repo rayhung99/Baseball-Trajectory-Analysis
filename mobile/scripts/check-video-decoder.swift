@@ -4,6 +4,14 @@ import AVFoundation
 @main
 struct CheckVideoDecoder {
     static func main() throws {
+        for value in [Double.nan, .infinity, -.infinity, 0, -1, Double(Int.max)] {
+            var rejected = false
+            do { _ = try VideoDecoder.positiveMetadataInteger(value, field: "fixture") }
+            catch { rejected = true }
+            precondition(rejected, "Invalid media metadata must throw instead of trapping")
+        }
+        let width = try VideoDecoder.positiveMetadataInteger(1920, field: "width")
+        precondition(width == 1920)
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directory) }

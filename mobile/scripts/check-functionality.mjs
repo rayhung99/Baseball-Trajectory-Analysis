@@ -86,6 +86,102 @@ function historyHarness() {
 
 const pitch = (id, speed = 120) => ({ job_id: id, speed_info: { release_speed_kmh: speed } });
 
+test('native analysis errors and empty results never become successful history records', () => {
+  const { toPitchResult } = loadModule('src/adapters/nativeAnalysis.ts');
+  assert.throws(() => toPitchResult({ job_id: 'failed', speed_info: { error: 'No ball detected in video' } }), /No ball detected/);
+  for (const raw of [null, {}, { speed_info: [] }, { speed_info: {} }, { speed_info: { release_speed_kmh: NaN } }]) {
+    assert.throws(() => toPitchResult(raw));
+  }
+});
+
+test('pipeline progress preserves the native overall percentage and rejects non-finite values', () => {
+  const { normalizePipelineProgress } = loadModule('src/utils/pipelineStages.ts');
+  for (const [stage, value] of [['setup', .04], ['detecting', .5], ['tracking', .6], ['calculating', .7], ['overlay', .71], ['done', 1]]) {
+    assert.equal(normalizePipelineProgress({ stage, progress: value, message: '' }).pct, Math.round(value * 100));
+  }
+  for (const value of [NaN, Infinity, -Infinity, -1]) {
+    assert.equal(normalizePipelineProgress({ stage: 'overlay', progress: value, message: '' }).pct, 0);
+  }
+});
+
+function analysisHarness() {
+  const hooks = hookHarness();
+  let calls = 0, removed = 0, finish, fail, progress;
+  const { useOfflineAnalysis } = loadModule('src/hooks/useOfflineAnalysis.ts', {
+    react: hooks.react,
+    '../../modules/expo-speedgun': {
+      analyzeVideoOffline: () => { calls++; return new Promise((resolve, reject) => { finish = resolve; fail = reject; }); },
+      addProgressListener: (listener) => { progress = listener; return { remove: () => { removed++; } }; },
+    },
+  });
+  const [api, otherApi] = hooks.render(() => [useOfflineAnalysis(), useOfflineAnalysis()]);
+  return { hooks, api, otherApi, finish: (result) => finish(result),
+    fail: (error) => fail(error),
+    emit: () => progress({ stage: 'detecting', progress: .5, message: 'test' }),
+    counts: () => ({ calls, removed }) };
+}
+
+test('analysis rejects overlap before render and releases the listener after completion', async () => {
+  const analysis = analysisHarness();
+  const first = analysis.api.analyze('file:///pitch.mp4', {});
+  const duplicate = analysis.api.analyze('file:///pitch.mp4', {});
+  const rejected = assert.rejects(duplicate, /分析.*進行|正在分析/);
+  const otherRejected = assert.rejects(analysis.otherApi.analyze('file:///other.mp4', {}), /分析.*進行|正在分析/);
+  assert.equal(analysis.counts().calls, 1);
+  analysis.finish(pitch('done'));
+  await Promise.all([first, rejected, otherRejected]);
+  assert.equal(analysis.counts().removed, 1);
+  const next = analysis.otherApi.analyze('file:///next.mp4', {});
+  analysis.finish(pitch('next'));
+  assert.equal((await next).job_id, 'next');
+  assert.deepEqual(analysis.counts(), { calls: 2, removed: 2 });
+  analysis.hooks.unmount();
+});
+
+test('cancel keeps the native slot until completion, then allows another analysis', async () => {
+  const analysis = analysisHarness();
+  let updates = 0;
+  const pending = analysis.api.analyze('file:///pitch.mp4', {}, { onProgress: () => { updates++; } });
+  const rejected = assert.rejects(pending, (error) => error.name === 'USER_CANCELLED');
+  analysis.api.cancel();
+  analysis.emit();
+  await assert.rejects(analysis.otherApi.analyze('file:///next.mp4', {}), /分析.*進行|正在分析/);
+  analysis.finish(pitch('cancelled'));
+  await rejected;
+  assert.equal(updates, 0);
+  const next = analysis.otherApi.analyze('file:///next.mp4', {});
+  analysis.finish(pitch('next'));
+  await next;
+  assert.deepEqual(analysis.counts(), { calls: 2, removed: 2 });
+  analysis.hooks.unmount();
+});
+
+test('native failure removes the listener and allows retry', async () => {
+  const analysis = analysisHarness();
+  const pending = analysis.api.analyze('file:///pitch.mp4', {});
+  const rejected = assert.rejects(pending, /decode failed/);
+  analysis.fail(new Error('decode failed'));
+  await rejected;
+  const next = analysis.api.analyze('file:///next.mp4', {});
+  analysis.finish(pitch('next'));
+  await next;
+  assert.deepEqual(analysis.counts(), { calls: 2, removed: 2 });
+  analysis.hooks.unmount();
+});
+
+test('unmounted analysis suppresses progress and refuses late success', async () => {
+  const analysis = analysisHarness();
+  let updates = 0;
+  const pending = analysis.api.analyze('file:///pitch.mp4', {}, { onProgress: () => { updates++; } });
+  const rejected = assert.rejects(pending, (error) => error.name === 'USER_CANCELLED');
+  analysis.hooks.unmount();
+  analysis.emit();
+  analysis.finish(pitch('late'));
+  await rejected;
+  assert.equal(updates, 0);
+  assert.equal(analysis.counts().removed, 1);
+});
+
 function captureHarness() {
   const hooks = hookHarness();
   const captures = [];
@@ -347,29 +443,61 @@ test('height hint never formats an absent height, even before a video is selecte
   assert.equal(runInNewContext(expression, { batterHeightError: false, needsHeight: false, hasValidBatterHeight: true, zoneHeightCm: 47.17 }), '好球帶高度約 47.2 cm。');
 });
 
-test('late metadata from a previous video cannot overwrite the newly selected video', async () => {
+function analyzeScreenCallback(name, globals) {
   const filename = path.join(root, 'src/screens/AnalyzeScreen.tsx');
   const source = ts.createSourceFile(filename, readFileSync(filename, 'utf8'), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
   let selection;
   const visit = (node) => {
-    if (ts.isVariableDeclaration(node) && node.name.getText(source) === 'selectVideo') selection = node.initializer;
+    if (ts.isVariableDeclaration(node) && node.name.getText(source) === name) selection = node.initializer;
     ts.forEachChild(node, visit);
   };
   visit(source);
   assert.ok(selection);
   const module = { exports: {} };
-  const requests = new Map();
-  let metadata;
   const code = ts.transpileModule(`module.exports = ${selection.getText(source)}`, {
     compilerOptions: { target: ts.ScriptTarget.ES2022 },
   }).outputText;
-  runInNewContext(code, {
-    module, metadataRequest: { current: 0 },
+  runInNewContext(code, { module, ...globals });
+  return module.exports;
+}
+
+test('rapid analysis taps keep the screen busy until the original request finishes', async () => {
+  let calls = 0, busy = false, finish, navigations = 0;
+  const start = analyzeScreenCallback('onAnalyzeOffline', {
+    videoUri: 'file:///pitch.mp4', analyzing: false, hasValidBatterHeight: true,
+    analyzingRef: { current: false }, settings: {}, batterHeightM: 1.75, effectiveStrikeZone: null,
+    rawLogsRef: { current: [] }, resetAnalysis() {},
+    setAnalyzing: (value) => { busy = value; },
+    setRawLogs() {}, setUploadPct() {}, setCurrentStage() {}, setStatusMsg() {}, setStatusType() {},
+    analyzeOffline: () => {
+      calls++;
+      if (calls > 1) return Promise.reject(new Error('已有分析正在進行'));
+      return new Promise((resolve) => { finish = resolve; });
+    },
+    isCancellation: () => false, friendlyError: (error) => error.message,
+    completeAnalysis() {}, navigation: { navigate: () => { navigations++; } },
+  });
+  const pending = start();
+  await start();
+  const remainedBusy = busy;
+  finish(pitch('done'));
+  await pending;
+  assert.equal(remainedBusy, true, 'A rejected duplicate must not reset the running UI');
+  assert.equal(calls, 1);
+  assert.equal(busy, false);
+  assert.equal(navigations, 1);
+});
+
+test('late metadata from a previous video cannot overwrite the newly selected video', async () => {
+  const requests = new Map();
+  let metadata;
+  const selectVideo = analyzeScreenCallback('selectVideo', {
+    metadataRequest: { current: 0 },
     getVideoMetadata: (uri) => new Promise((resolve, reject) => requests.set(uri, { resolve, reject })),
     setVideoMeta: (value) => { metadata = typeof value === 'function' ? value(metadata) : value; },
     setVideoUri() {}, setVideoName() {}, resetAnalysis() {}, setStatusMsg() {}, setStatusType() {},
   });
-  const select = (uri) => module.exports(uri, uri, { sizeMB: '?', durationS: '?' });
+  const select = (uri) => selectVideo(uri, uri, { sizeMB: '?', durationS: '?' });
   select('old');
   select('new');
   requests.get('new').resolve({ width: 1920, fps: 120 });

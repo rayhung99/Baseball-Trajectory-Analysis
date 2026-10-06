@@ -46,7 +46,7 @@ PitchMotion does not require an account or network connection. To test: open the
 
 ## App Store Connect 待填
 
-最近一次程式碼審查與驗證紀錄：[2026-09-16 上架前審查](release-review-2026-09-16.md)。
+最近一次程式碼審查與驗證紀錄：[2026-10-06 演算法與功能穩定性排查](release-review-2026-10-06.md)。
 
 - [ ] 建立 App record，確認 Bundle ID 與本專案一致
 - [ ] 完成新版年齡分級問卷

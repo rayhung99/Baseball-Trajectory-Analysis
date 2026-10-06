@@ -78,6 +78,7 @@ export default function AnalyzeScreen() {
   const [batterHeightText, setBatterHeightText] = useState('');
   const [heightTouched, setHeightTouched] = useState(false);
   const [analyzing, setAnalyzing] = useState(false);
+  const analyzingRef = useRef(false);
   const [uploadPct, setUploadPct] = useState(0);
   const [currentStage, setCurrentStage] = useState<string | null>(null);
   const [stageMessages, setStageMessages] = useState<string[]>([]);
@@ -190,7 +191,8 @@ export default function AnalyzeScreen() {
   };
 
   const onAnalyzeOffline = async () => {
-    if (!videoUri || analyzing || !hasValidBatterHeight) return;
+    if (!videoUri || analyzingRef.current || !hasValidBatterHeight) return;
+    analyzingRef.current = true;
     setAnalyzing(true);
     resetAnalysis();
     const initEntry = { msg: '本機分析已開始', isError: false };
@@ -242,6 +244,7 @@ export default function AnalyzeScreen() {
         setStatusType('error');
       }
     } finally {
+      analyzingRef.current = false;
       setAnalyzing(false);
     }
   };

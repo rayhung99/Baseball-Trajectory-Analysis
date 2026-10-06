@@ -38,6 +38,15 @@ final class VideoDecoder {
     private var lastSampleBuffer: CMSampleBuffer?
     private var hasDecodedFrame = false
 
+    // Numeric casts trap on non-finite/out-of-range media metadata. Fail the
+    // import before creating readers, compositions, or pixel buffers instead.
+    static func positiveMetadataInteger(_ value: Double, field: String) throws -> Int {
+        guard let result = Int(exactly: value.rounded(.towardZero)), result > 0 else {
+            throw SpeedgunError.videoLoadFailed("Invalid \(field)")
+        }
+        return result
+    }
+
     init(url: URL) throws {
         asset = AVAsset(url: url)
 
@@ -50,7 +59,10 @@ final class VideoDecoder {
         // For iPhone slo-mo (captured at 240fps, played at 30fps), nominalFrameRate = 30.
         // This keeps totalFrames and progress calculation accurate.
         let nominalFPS = track.nominalFrameRate
-        fps = max(1, Int(round(nominalFPS)))
+        fps = try Self.positiveMetadataInteger(Double(nominalFPS).rounded(), field: "frame rate")
+        guard fps <= Int32.max else {
+            throw SpeedgunError.videoLoadFailed("Frame rate exceeds supported time scale")
+        }
 
         // captureFps: true capture rate derived from minFrameDuration.
         // For normal video minFrameDuration ≈ 1/fps, so captureFps == fps.
@@ -60,7 +72,7 @@ final class VideoDecoder {
         let minDurSecs = (minDur.isValid && !minDur.isIndefinite && minDur.seconds > 0)
             ? minDur.seconds : 0.0
         let rawCaptureFps = minDurSecs > 0
-            ? Int(round(1.0 / minDurSecs))
+            ? Int(min(960.0, (1.0 / minDurSecs).rounded()))
             : fps
         let cappedRawCaptureFps = max(fps, min(rawCaptureFps, 960))
         let highFpsBuckets = [120, 240, 480, 960]
@@ -92,12 +104,15 @@ final class VideoDecoder {
         let transform = track.preferredTransform
         let size = track.naturalSize
         let transformedSize = size.applying(transform)
-        displayWidth = Int(abs(transformedSize.width))
-        displayHeight = Int(abs(transformedSize.height))
+        displayWidth = try Self.positiveMetadataInteger(Double(abs(transformedSize.width)), field: "video width")
+        displayHeight = try Self.positiveMetadataInteger(Double(abs(transformedSize.height)), field: "video height")
         naturalSize = CGSize(width: displayWidth, height: displayHeight)
 
         duration = CMTimeGetSeconds(asset.duration)
-        totalFrames = max(1, Int(round(duration * Double(fps))))
+        guard duration.isFinite, duration > 0 else {
+            throw SpeedgunError.videoLoadFailed("Invalid video duration")
+        }
+        totalFrames = try Self.positiveMetadataInteger(max(1, (duration * Double(fps)).rounded()), field: "frame count")
     }
 
     // MARK: - Camera Focal Length
@@ -131,7 +146,7 @@ final class VideoDecoder {
             }
             // Sane 35mm-equivalent range: 10mm (ultrawide) … 350mm (max tele zoom)
             guard let f35 = f35mm, f35 >= 10.0, f35 <= 350.0 else { continue }
-            let diagPx = Double(displayWidth * displayWidth + displayHeight * displayHeight).squareRoot()
+            let diagPx = hypot(Double(displayWidth), Double(displayHeight))
             let focalPx = f35 * diagPx / 43.27
             NSLog("[VideoDecoder] Camera focal length from metadata: %.1fmm (35mm equiv) → %.0fpx", f35, focalPx)
             return focalPx
@@ -298,8 +313,7 @@ final class VideoDecoder {
         NSLog("[VideoDecoder] startReading OK — status=%d fps=%d captureFps=%d size=%dx%d",
               reader.status.rawValue,
               fps, captureFps,
-              Int(abs(videoTrack.naturalSize.applying(videoTrack.preferredTransform).width)),
-              Int(abs(videoTrack.naturalSize.applying(videoTrack.preferredTransform).height)))
+              displayWidth, displayHeight)
     }
 
     /// Expose current reader status for diagnostics

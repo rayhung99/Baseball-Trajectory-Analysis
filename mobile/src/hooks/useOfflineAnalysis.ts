@@ -1,4 +1,4 @@
-import { useRef, useCallback } from 'react';
+import { useRef, useCallback, useEffect } from 'react';
 import {
   analyzeVideoOffline,
   addProgressListener,
@@ -8,6 +8,11 @@ import {
 import { toPitchResult } from '../adapters/nativeAnalysis';
 import { PitchResult, StrikeZoneCalibration } from '../types';
 import { normalizePipelineProgress, type PipelineProgressState } from '../utils/pipelineStages';
+import { UserCancelledError } from '../utils/errors';
+
+// ponytail: one native slot because progress has no job ID; add per-job events
+// before allowing parallel analyses.
+let analysisInProgress = false;
 
 interface OfflineAnalysisCallbacks {
   onProgress?: (progress: PipelineProgressState) => void;
@@ -15,6 +20,18 @@ interface OfflineAnalysisCallbacks {
 
 export function useOfflineAnalysis() {
   const abortRef = useRef(false);
+  const mountedRef = useRef(true);
+  const subscriptionRef = useRef<{ remove(): void } | null>(null);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      abortRef.current = true;
+      subscriptionRef.current?.remove();
+      subscriptionRef.current = null;
+    };
+  }, []);
 
   const analyze = useCallback(
     async (
@@ -31,15 +48,16 @@ export function useOfflineAnalysis() {
       },
       callbacks?: OfflineAnalysisCallbacks,
     ): Promise<PitchResult> => {
+      if (!mountedRef.current) throw new UserCancelledError();
+      if (analysisInProgress) throw new Error('已有分析正在進行，請等待完成後再試。');
+      analysisInProgress = true;
       abortRef.current = false;
 
-      // Subscribe to progress events from native module
-      const sub = addProgressListener((event) => {
-        if (abortRef.current) return;
-        callbacks?.onProgress?.(normalizePipelineProgress(event));
-      });
-
       try {
+        subscriptionRef.current = addProgressListener((event) => {
+          if (abortRef.current) return;
+          callbacks?.onProgress?.(normalizePipelineProgress(event));
+        });
         const nativeOptions: AnalysisOptions = {
           moundDistance: opts.moundDistanceM,
           strideCorrectionM: opts.strideCorrectionM,
@@ -56,16 +74,22 @@ export function useOfflineAnalysis() {
         }
 
         const raw = await analyzeVideoOffline(videoUri, nativeOptions);
+        if (abortRef.current) throw new UserCancelledError();
         return toPitchResult(raw);
       } finally {
-        sub.remove();
+        analysisInProgress = false;
+        subscriptionRef.current?.remove();
+        subscriptionRef.current = null;
       }
     },
     [],
   );
 
   const cancel = useCallback(() => {
+    // Stop delivery; the native work keeps its slot until it actually finishes.
     abortRef.current = true;
+    subscriptionRef.current?.remove();
+    subscriptionRef.current = null;
   }, []);
 
   return { analyze, cancel };

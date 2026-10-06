@@ -137,6 +137,60 @@ struct SpeedCalculatorCheck {
         })?.4
         precondition(firstBallId == secondBallId, "fast ball track fragmented when another object had IOU overlap")
 
+        if CommandLine.arguments.count == 1 || CommandLine.arguments.contains("invalid-input") {
+            for (distance, stride) in [(Double.nan, 0.0), (.infinity, 0), (18.44, .nan), (18.44, -1), (18.44, 18.44)] {
+                let invalid = BallSpeedCalculator(fps: 120, videoWidth: 1920, videoHeight: 1080,
+                    theoreticalDistance: distance, strideCorrectionM: stride)
+                    .calculateSpeedDetailed(trajectoryPoints: points, firstBallTimeS: 0.05, lastBallTimeS: 0.5)
+                precondition(invalid.error != nil && invalid.releaseSpeedKmh == nil, "Invalid calibration must not produce a speed")
+            }
+            for (first, last) in [(Double.nan, 0.5), (0.05, .infinity), (0.5, 0.1), (-0.1, 0.5)] {
+                let invalid = calculator.calculateSpeedDetailed(trajectoryPoints: points, firstBallTimeS: first, lastBallTimeS: last)
+                precondition(invalid.error != nil && invalid.releaseSpeedKmh == nil, "Invalid timestamps must not fall back to an invented speed")
+            }
+            let invalid = calculator.calculateSpeedDetailed(trajectoryPoints: [CGPoint(x: CGFloat.nan, y: 1), points[1]])
+            precondition(invalid.error != nil && invalid.releaseSpeedKmh == nil)
+        }
+        if CommandLine.arguments.count == 1 || CommandLine.arguments.contains("ttc-crosscheck") {
+            let weakGrowth = [0.05, 0.15, 0.35].enumerated().map { index, time -> FrameInfo in
+                var frame = FrameInfo(frameIndex: index, captureTimeS: time)
+                frame.ballInFrame = true
+                frame.ballArea = 100 / pow(0.8 - time, 2)
+                return frame
+            }
+            let measured = calculator.calculateSpeedDetailed(trajectoryPoints: points, frameInfos: weakGrowth,
+                releaseTimeS: 0, firstBallTimeS: 0.05, lastBallTimeS: 0.5, ballSizePreSeconds: 0.05)
+            precondition(abs((measured.flightTimeS ?? 0) - 0.5) < 1e-6, "TTC 0.8s must not override an unclamped 0.5s endpoint")
+            precondition(measured.ttcStatus == "rejected_long_vs_endpoint")
+        }
+        if CommandLine.arguments.count == 1 || CommandLine.arguments.contains("ttc-samples") {
+            let frames = (0..<4096).map { index -> FrameInfo in
+                let time = Double(index) / 4095 * 0.7
+                var frame = FrameInfo(frameIndex: index, captureTimeS: time)
+                frame.ballInFrame = true
+                frame.ballArea = 100 / pow(0.8 - time, 2)
+                return frame
+            }
+            let started = Date()
+            let dense = calculator.estimateTTC(frameInfos: frames)
+            let elapsed = Date().timeIntervalSince(started)
+            precondition(abs((dense ?? 0) - 0.8) < 1e-6)
+            print("TTC 4096 observations: \(elapsed * 1000) ms")
+            let shuffled = calculator.estimateTTC(frameInfos: frames.reversed())
+            precondition(abs((shuffled ?? 0) - 0.8) < 1e-6, "Input order must not change contact time")
+            var invalid = frames[0]
+            invalid.ballArea = .infinity
+            invalid.captureTimeS = .nan
+            let contaminated = calculator.estimateTTC(frameInfos: [invalid] + frames + [invalid])
+            precondition(abs((contaminated ?? 0) - 0.8) < 1e-6)
+            let duplicateTimes = [frames[0], frames[0], frames[4095]]
+            precondition(calculator.estimateTTC(frameInfos: duplicateTimes) == nil, "Repeated timestamps are not independent measurements")
+            var synthetic = frames[0]
+            synthetic.isInterpolated = true
+            precondition(calculator.estimateTTC(frameInfos: [synthetic, synthetic, synthetic]) == nil)
+            let unanchored = calculator.calculateSpeedDetailed(trajectoryPoints: points)
+            precondition(unanchored.trajectoryQualityWarning == true, "Point-count fallback must disclose uncertain timing")
+        }
         print("speed calculator checks passed")
     }
 }

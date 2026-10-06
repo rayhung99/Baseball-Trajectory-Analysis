@@ -20,9 +20,10 @@ final class BallSpeedCalculator {
     var farY: Int?
 
     var effectiveDistance: Double? {
-        guard let d = theoreticalDistance else { return nil }
-        guard applyStrideCorrection else { return max(d, 1.0) }
-        return max(d - strideCorrectionM, 1.0)
+        guard let d = theoreticalDistance, d.isFinite, d > 0 else { return nil }
+        guard applyStrideCorrection else { return d }
+        guard strideCorrectionM.isFinite, strideCorrectionM >= 0, d - strideCorrectionM >= 1 else { return nil }
+        return d - strideCorrectionM
     }
 
     init(
@@ -141,7 +142,7 @@ final class BallSpeedCalculator {
     private func shouldPreferEndpointTime(ttcTotalTime: Double, endpointTime: Double) -> Bool {
         guard endpointTime > 0, ttcTotalTime > 0 else { return false }
         let tolerance = max(0.055, endpointTime * 0.14)
-        return ttcTotalTime + tolerance < endpointTime
+        return abs(ttcTotalTime - endpointTime) > tolerance
     }
 
     private func clampFlightTime(_ raw: Double, distance: Double?) -> (time: Double, clamped: Bool) {
@@ -178,9 +179,19 @@ final class BallSpeedCalculator {
         // Only source frames can influence timing. Optical-flow inserts and
         // track-gap fills are useful for a smooth overlay but invent no physical
         // measurement, so including them here would make TTC look overconfident.
-        let samples = frameInfos
-            .filter { $0.ballInFrame && !$0.ballLostTracking && !$0.isInterpolated && $0.ballArea > 4 }
+        let observations = frameInfos
+            .filter { $0.ballInFrame && !$0.ballLostTracking && !$0.isInterpolated
+                && $0.ballArea.isFinite && $0.ballArea > 4 && $0.captureTimeS.isFinite && $0.captureTimeS >= 0 }
             .map { ($0.captureTimeS, $0.ballArea) }
+            .sorted { $0.0 < $1.0 }
+            .reduce(into: [(Double, Double)]()) { samples, sample in
+                if samples.last?.0 != sample.0 { samples.append(sample) }
+            }
+        // ponytail: bound the quadratic fit to 64 evenly spaced real observations;
+        // use a streaming robust estimator if longer-window accuracy needs it.
+        let samples = observations.count > 64
+            ? (0..<64).map { observations[$0 * (observations.count - 1) / 63] }
+            : observations
         // Lowered from ≥4 → ≥3 (short backyard clips at high fps have few growth samples)
         guard samples.count >= 3 else {
             NSLog("[BallSpeedCalculator] TTC fallback: insufficient area samples (%d<3)", samples.count)
@@ -273,7 +284,7 @@ final class BallSpeedCalculator {
             sumSq += dx * dx + dy * dy
         }
         let rmse = sqrt(sumSq / Double(points.count))
-        let diag = sqrt(Double(videoWidth * videoWidth + videoHeight * videoHeight))
+        let diag = hypot(Double(videoWidth), Double(videoHeight))
         return (rmse / (diag + 1e-6)).rounded(toPlaces: 4)
     }
 
@@ -291,31 +302,42 @@ final class BallSpeedCalculator {
         lastBallTimeS: Double? = nil,
         ballSizePreSeconds: Double? = nil
     ) -> SpeedInfo {
+        guard videoWidth > 0, videoHeight > 0,
+              let distance = theoreticalDistance, distance.isFinite,
+              distance >= MIN_MANUAL_MOUND_DISTANCE_M, distance <= MAX_MANUAL_MOUND_DISTANCE_M,
+              effectiveDistance != nil else {
+            var info = SpeedInfo()
+            info.error = "投打距離或跨步補償無效，請重新校正。"
+            return info
+        }
+        let times = [releaseTimeS, firstBallTimeS, lastBallTimeS, ballSizePreSeconds].compactMap { $0 }
+        guard times.allSatisfy({ $0.isFinite && $0 >= 0 }),
+              firstBallTimeS == nil || lastBallTimeS == nil || lastBallTimeS! > firstBallTimeS!,
+              releaseTimeS == nil || firstBallTimeS == nil || releaseTimeS! <= firstBallTimeS!,
+              releaseTimeS == nil || lastBallTimeS == nil || lastBallTimeS! > releaseTimeS!,
+              trajectoryPoints.allSatisfy({ $0.x.isFinite && $0.y.isFinite }) else {
+            var info = SpeedInfo()
+            info.error = "影片時間戳或球路座標異常，請重新選擇影片。"
+            return info
+        }
         guard trajectoryPoints.count >= 2 else {
             var info = SpeedInfo()
             info.error = "Not enough trajectory points (need >= 2)"
             return info
         }
 
-        if theoreticalDistance != nil {
-            return calculateTheoretical(
-                trajectoryPoints: trajectoryPoints,
-                frameInfos: frameInfos,
-                releasePoint: releasePoint,
-                releaseFrameIdx: releaseFrameIdx,
-                firstBallFrameIdx: firstBallFrameIdx,
-                lastBallFrameIdx: lastBallFrameIdx,
-                releaseTimeS: releaseTimeS,
-                firstBallTimeS: firstBallTimeS,
-                lastBallTimeS: lastBallTimeS,
-                ballSizePreSeconds: ballSizePreSeconds
-            )
-        }
-
-        // Pixel-based fallback (rare case)
-        var info = SpeedInfo()
-        info.error = "Missing theoretical distance for speed calculation"
-        return info
+        return calculateTheoretical(
+            trajectoryPoints: trajectoryPoints,
+            frameInfos: frameInfos,
+            releasePoint: releasePoint,
+            releaseFrameIdx: releaseFrameIdx,
+            firstBallFrameIdx: firstBallFrameIdx,
+            lastBallFrameIdx: lastBallFrameIdx,
+            releaseTimeS: releaseTimeS,
+            firstBallTimeS: firstBallTimeS,
+            lastBallTimeS: lastBallTimeS,
+            ballSizePreSeconds: ballSizePreSeconds
+        )
     }
 
     // MARK: - Theoretical Mode
@@ -383,7 +405,8 @@ final class BallSpeedCalculator {
                 flightTimeSource = endpointEstimate.source
                 flightTimeClamped = endpointEstimate.clamped
                 preDetectInfo = endpointPreDetectInfo
-                resolvedTtcStatus = clampedTtc.clamped ? "rejected_clamped" : "rejected_short_vs_endpoint"
+                resolvedTtcStatus = clampedTtc.clamped ? "rejected_clamped"
+                    : (clampedTtc.time < endpointEstimate.time ? "rejected_short_vs_endpoint" : "rejected_long_vs_endpoint")
                 NSLog("[BallSpeedCalculator] Rejecting TTC: ttcTotal=%.3fs endpoint=%.3fs source=%@",
                       clampedTtc.time, endpointEstimate.time, endpointEstimate.source)
             } else {
@@ -421,7 +444,7 @@ final class BallSpeedCalculator {
         }
 
         let linearity = computeTrajectoryLinearity(trajectoryPoints)
-        let qualityWarning = linearity > 0.03
+        let qualityWarning = linearity > 0.03 || flightTimeSource == "point_count" || physicsClamped
 
         var info = SpeedInfo()
         info.releaseSpeedKmh = releaseSpeedKmh

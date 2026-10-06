@@ -34,11 +34,11 @@ assert.throws(() => toPitchResult({ error: 'native failed' }), /native failed/);
 
 assert.deepEqual(
   normalizePipelineProgress({ stage: 'detecting', progress: 0.5, message: '' }),
-  { stageId: 'detection', message: '處理中…', pct: 25 },
+  { stageId: 'detection', message: '偵測棒球中…', pct: 50 },
 );
 assert.deepEqual(
   normalizePipelineProgress({ stage: 'calculating', progress: 0.65, message: 'Speed' }),
-  { stageId: 'speed', message: 'Speed', pct: 63 },
+  { stageId: 'speed', message: 'Speed', pct: 65 },
 );
 assert.deepEqual(
   normalizePipelineProgress({ stage: 'done', progress: 1, message: 'Analysis complete' }),

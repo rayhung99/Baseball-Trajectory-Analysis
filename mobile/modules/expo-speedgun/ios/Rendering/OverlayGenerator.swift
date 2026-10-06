@@ -49,16 +49,11 @@ final class OverlayGenerator {
         absCalibration: ABSCalibration? = nil,
         progressCallback: ((Double, String) -> Void)? = nil
     ) throws {
-        let asset = AVAsset(url: sourceURL)
-        guard let videoTrack = asset.tracks(withMediaType: .video).first else {
-            throw SpeedgunError.overlayGenerationFailed("No video track")
-        }
-
-        let naturalSize = videoTrack.naturalSize
-        let transform = videoTrack.preferredTransform
-        let transformedSize = naturalSize.applying(transform)
-        let srcWidth = Int(abs(transformedSize.width))
-        let srcHeight = Int(abs(transformedSize.height))
+        let metadata = try VideoDecoder(url: sourceURL)
+        let asset = metadata.asset
+        let videoTrack = metadata.videoTrack
+        let srcWidth = metadata.displayWidth
+        let srcHeight = metadata.displayHeight
         let outputSize = adaptiveOutputSize(sourceWidth: srcWidth, sourceHeight: srcHeight)
         let outWidth = outputSize.width
         let outHeight = outputSize.height
@@ -79,11 +74,9 @@ final class OverlayGenerator {
         let readerOutput: AVAssetReaderOutput
         let needsRotation = !videoTrack.preferredTransform.isIdentity
         if needsRotation {
-            let nominalFPS = videoTrack.nominalFrameRate
-            let fpsInt = max(1, Int(round(nominalFPS)))
             let composition = AVMutableVideoComposition()
             composition.renderSize = CGSize(width: srcWidth, height: srcHeight)
-            composition.frameDuration = CMTime(value: 1, timescale: Int32(fpsInt))
+            composition.frameDuration = CMTime(value: 1, timescale: Int32(metadata.fps))
 
             let instruction = AVMutableVideoCompositionInstruction()
             instruction.timeRange = CMTimeRange(start: .zero, duration: asset.duration)
@@ -117,7 +110,7 @@ final class OverlayGenerator {
                 try? FileManager.default.removeItem(at: outputURL)
             }
         }
-        let expectedFPS = max(24, min(120, Int(round(videoTrack.nominalFrameRate))))
+        let expectedFPS = max(24, min(120, metadata.fps))
         let targetBitrate = overlayBitrate(width: outWidth, height: outHeight)
 
         let videoSettings: [String: Any] = [
