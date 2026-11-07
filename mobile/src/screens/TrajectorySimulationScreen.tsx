@@ -1,16 +1,16 @@
-import React, { useMemo, useState } from 'react';
-import { ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import React, { useCallback, useMemo, useState } from 'react';
+import { ScrollView, StyleSheet, Text, View } from 'react-native';
 import { RouteProp, useRoute } from '@react-navigation/native';
-import Trajectory3DView from '../components/Trajectory3DView';
+import PitchReplay from '../components/PitchReplay';
 import TrajectoryVideoCompare from '../components/trajectory/TrajectoryVideoCompare';
 import { PitchResult } from '../types';
 import { Colors, FontSize, Layout, Radius, Shadows, Spacing, Surfaces } from '../theme';
-import { formatSpeed, pitchColor, pitchTypeLabel, speedUnitLabel } from '../utils/conversions';
-import { buildPitchReplayModel } from '../utils/pitchReplay';
+import { formatSpeed, getSpeedKmh, pitchColor, pitchDotColor, pitchTypeLabel, speedUnitLabel } from '../utils/conversions';
+import { buildPitchReplayModel, buildTunnelMetrics } from '../utils/pitchReplay';
 import { useSettings } from '../context/SettingsContext';
 
 type RouteParams = {
-  TrajectorySimulation: { pitch: PitchResult; comparePitch?: PitchResult; title?: string };
+  TrajectorySimulation: { pitch: PitchResult; comparePitch?: PitchResult; comparisonPitches?: PitchResult[]; title?: string };
 };
 
 function fmt(value: number | null | undefined, digits = 1) {
@@ -19,14 +19,25 @@ function fmt(value: number | null | undefined, digits = 1) {
 
 export default function TrajectorySimulationScreen() {
   const route = useRoute<RouteProp<RouteParams, 'TrajectorySimulation'>>();
-  const { pitch, comparePitch } = route.params;
+  const { pitch, comparePitch, comparisonPitches } = route.params;
   const { settings } = useSettings();
   const [scrollEnabled, setScrollEnabled] = useState(true);
-  const [showComparison, setShowComparison] = useState(!!comparePitch);
+  const handleGestureActiveChange = useCallback((active: boolean) => setScrollEnabled(!active), []);
   const model = useMemo(() => buildPitchReplayModel(pitch), [pitch]);
-  const comparisonModel = useMemo(() => comparePitch ? buildPitchReplayModel(comparePitch) : null, [comparePitch]);
+  const tunnelComparisons = useMemo(
+    () => (comparisonPitches?.length ? comparisonPitches : comparePitch ? [comparePitch] : []).slice(0, 5),
+    [comparePitch, comparisonPitches],
+  );
+  const compareModel = useMemo(
+    () => tunnelComparisons[0] ? buildPitchReplayModel(tunnelComparisons[0]) : null,
+    [tunnelComparisons],
+  );
+  const tunnel = useMemo(
+    () => compareModel ? buildTunnelMetrics(model, compareModel) : null,
+    [compareModel, model],
+  );
   const si = pitch.speed_info || {};
-  const primaryKmh = si.release_speed_kmh ?? si.initial_speed_kmh ?? null;
+  const primaryKmh = getSpeedKmh(pitch);
   const unitLabel = speedUnitLabel(settings.speedUnit);
   const primarySpeed = primaryKmh != null ? formatSpeed(primaryKmh, settings.speedUnit) : null;
   const type = si.pitch_type && si.pitch_type !== 'Unknown' ? si.pitch_type : 'Unknown';
@@ -42,6 +53,7 @@ export default function TrajectorySimulationScreen() {
     { label: '補點', value: syntheticPct != null ? `${syntheticPct}%` : '-', unit: '' },
     { label: '橫移', value: fmt(si.horizontal_break_cm, 1), unit: 'cm' },
     { label: '垂直位移', value: fmt(si.induced_vertical_break_cm, 1), unit: 'cm' },
+    { label: '3D 校正', value: model.endpointCalibrated ? '端點校正' : '畫面估算', unit: '' },
     { label: '來源', value: model.confidenceLabel, unit: '', wide: true },
   ];
 
@@ -55,8 +67,8 @@ export default function TrajectorySimulationScreen() {
       <View style={styles.hero}>
         <View style={styles.heroText}>
           <Text style={styles.eyebrow}>進壘回放</Text>
-          <Text style={styles.title}>3D 進壘軌跡</Text>
-          <Text style={styles.subtitle}>與進壘動畫共用同一份實測／補點軌跡</Text>
+          <Text style={styles.title}>互動 3D 進壘回放</Text>
+          <Text style={styles.subtitle}>{tunnelComparisons.length ? `${tunnelComparisons.length + 1} 條球路同步出手，到位後放大好球帶；拖曳回到第三人稱全景` : '到位後放大好球帶；拖曳鏡頭從第三人稱查看完整投球場景'}</Text>
         </View>
         {type !== 'Unknown' && (
           <View style={[styles.typePill, { backgroundColor: color }]}>
@@ -66,61 +78,48 @@ export default function TrajectorySimulationScreen() {
       </View>
 
       <View style={styles.viewerCard}>
-        <Trajectory3DView
-          model={model}
-          pitchColor={color}
-          comparisonModel={showComparison ? comparisonModel : null}
-          comparisonColor={comparePitch ? pitchColor(comparePitch.speed_info?.pitch_type ?? '') : Colors.accent2}
-          comparisonLabel="上一球"
-          onGestureActiveChange={(active) => setScrollEnabled(!active)}
+        <PitchReplay
+          key={[pitch, ...tunnelComparisons].map((item) => item.job_id).join(':')}
+          pitch={pitch}
+          comparisonPitches={tunnelComparisons}
+          interactive
+          onGestureActiveChange={handleGestureActiveChange}
         />
       </View>
 
-      {comparePitch && comparisonModel && (
-        <View style={styles.compareCard}>
-          <View style={styles.compareHeader}>
-            <View style={styles.compareHeaderCopy}>
-              <Text style={styles.cardTitle}>球路比較</Text>
-              <Text style={styles.cardSub}>將上一球疊加在相同視角</Text>
+      {tunnel && tunnelComparisons[0] ? (
+        <View style={styles.card}>
+          <View style={styles.tunnelHeader}>
+            <View>
+              <Text style={styles.cardTitle}>球路配對與 Tunnel</Text>
+              <Text style={styles.cardSub}>最多六條軌跡同步疊加；分離距離以 A/B 為基準</Text>
             </View>
-            <TouchableOpacity
-              style={[styles.compareToggle, showComparison && styles.compareToggleActive]}
-              onPress={() => setShowComparison((value) => !value)}
-              accessibilityRole="switch"
-              accessibilityState={{ checked: showComparison }}
-            >
-              <Text style={[styles.compareToggleText, showComparison && styles.compareToggleTextActive]}>
-                {showComparison ? '已顯示' : '已隱藏'}
-              </Text>
-            </TouchableOpacity>
+            <View style={styles.tunnelBadge}>
+              <Text style={styles.tunnelBadgeText}>{tunnel.label}</Text>
+            </View>
           </View>
-          <View style={styles.compareGrid}>
+          <View style={styles.pairRow}>
+            {[pitch, ...tunnelComparisons].map((item, index) => (
+              <React.Fragment key={item.job_id || index}>
+                <View style={[styles.pairDot, { backgroundColor: pitchDotColor(index) }]} />
+                <Text style={styles.pairText}>{String.fromCharCode(65 + index)} · {pitchTypeLabel(item.speed_info?.pitch_type)}</Text>
+              </React.Fragment>
+            ))}
+          </View>
+          <View style={styles.statGrid}>
             {[
-              {
-                label: '本球',
-                type: pitchTypeLabel(type),
-                speed: primarySpeed,
-                color,
-              },
-              {
-                label: '上一球',
-                type: pitchTypeLabel(comparePitch.speed_info?.pitch_type),
-                speed: formatSpeed(comparePitch.speed_info?.release_speed_kmh ?? comparePitch.speed_info?.initial_speed_kmh, settings.speedUnit),
-                color: pitchColor(comparePitch.speed_info?.pitch_type ?? ''),
-              },
+              { label: '出手分離', value: tunnel.releaseSeparationCm },
+              { label: '飛行中點', value: tunnel.midpointSeparationCm },
+              { label: '進壘分離', value: tunnel.plateSeparationCm },
             ].map((item) => (
-              <View key={item.label} style={styles.compareColumn}>
-                <View style={styles.compareLabelRow}>
-                  <View style={[styles.compareDot, { backgroundColor: item.color }]} />
-                  <Text style={styles.compareLabel}>{item.label}</Text>
-                </View>
-                <Text style={styles.compareType}>{item.type}</Text>
-                <Text style={styles.compareSpeed}>{item.speed} <Text style={styles.compareUnit}>{unitLabel}</Text></Text>
+              <View key={item.label} style={styles.statCell}>
+                <Text style={styles.statValue}>{item.value.toFixed(1)}</Text>
+                <Text style={styles.statLabel}>{item.label} · cm</Text>
               </View>
             ))}
           </View>
         </View>
-      )}
+      ) : null}
 
       <View style={styles.card}>
         <TrajectoryVideoCompare pitch={pitch} pitchColor={color} />
@@ -145,7 +144,9 @@ export default function TrajectorySimulationScreen() {
         <Text style={styles.noteTitle}>精準度說明</Text>
         <Text style={styles.noteText}>{model.warning}</Text>
         <Text style={styles.noteText}>
-          目前深度軸由投打距離建立，左右與高度由畫面座標、好球帶寬高與 break 估算；若要提升成校正級 3D，需要相機內參或額外場地校正。
+          {model.endpointCalibrated
+            ? '3D 起點與終點採原生分析的世界座標校正，中段曲線保留畫面實測形變；單鏡頭無法觀測的深度仍依飛行時間重建。'
+            : '本次資料缺少世界座標端點，3D 會以好球帶比例尺和投打距離重建；完成場地或相機校正後可提高絕對位置精度。'}
         </Text>
       </View>
     </ScrollView>
@@ -209,50 +210,6 @@ const styles = StyleSheet.create({
     borderRadius: Radius.xxl,
     ...Shadows.card,
   },
-  compareCard: {
-    ...Surfaces.card,
-    width: '100%',
-    maxWidth: Layout.maxWidth,
-    marginBottom: Spacing.md,
-    ...Shadows.soft,
-  },
-  compareHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    gap: Spacing.sm,
-    marginBottom: Spacing.md,
-  },
-  compareHeaderCopy: { flex: 1 },
-  compareToggle: {
-    minHeight: 40,
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderRadius: Radius.lg,
-    borderWidth: 1,
-    borderColor: Colors.border,
-    paddingHorizontal: Spacing.md,
-    backgroundColor: Colors.surface2,
-  },
-  compareToggleActive: { borderColor: Colors.accent, backgroundColor: Colors.accentSubtle },
-  compareToggleText: { color: Colors.textMuted, fontSize: FontSize.sm, fontWeight: '800' },
-  compareToggleTextActive: { color: Colors.accent },
-  compareGrid: { flexDirection: 'row', gap: Spacing.sm },
-  compareColumn: {
-    flex: 1,
-    minHeight: 94,
-    borderRadius: Radius.lg,
-    borderWidth: 1,
-    borderColor: Colors.border,
-    backgroundColor: Colors.surface2,
-    padding: Spacing.md,
-  },
-  compareLabelRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
-  compareDot: { width: 8, height: 8, borderRadius: 4 },
-  compareLabel: { color: Colors.textMuted, fontSize: FontSize.sm, fontWeight: '800' },
-  compareType: { color: Colors.text, fontSize: FontSize.md, fontWeight: '900', marginTop: Spacing.sm },
-  compareSpeed: { color: Colors.text, fontSize: FontSize.xl, fontWeight: '900', marginTop: 3 },
-  compareUnit: { color: Colors.textMuted, fontSize: FontSize.sm, fontWeight: '700' },
   card: {
     ...Surfaces.card,
     width: '100%',
@@ -270,6 +227,24 @@ const styles = StyleSheet.create({
     fontSize: FontSize.sm,
     color: Colors.textMuted,
   },
+  tunnelHeader: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    justifyContent: 'space-between',
+    gap: Spacing.sm,
+  },
+  tunnelBadge: {
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 999,
+    backgroundColor: Colors.accentSubtle,
+    borderWidth: 1,
+    borderColor: Colors.accentBorder,
+  },
+  tunnelBadgeText: { color: Colors.accent, fontSize: 11, fontWeight: '900' },
+  pairRow: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: 6, marginTop: Spacing.md },
+  pairDot: { width: 9, height: 9, borderRadius: 5 },
+  pairText: { color: Colors.textMuted, fontSize: 12, fontWeight: '700', marginRight: Spacing.sm },
   statGrid: {
     flexDirection: 'row',
     flexWrap: 'wrap',

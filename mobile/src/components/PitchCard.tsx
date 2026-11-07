@@ -2,7 +2,7 @@ import React from 'react';
 import { View, Text, StyleSheet, TouchableOpacity } from 'react-native';
 import { Colors, Radius, Shadows, Spacing } from '../theme';
 import { PitchResult } from '../types';
-import { formatSpeed, pitchColor, pitchTypeLabel, formatTime, formatDate, shortMethod, speedUnitLabel } from '../utils/conversions';
+import { formatSpeed, getSpeedKmh, pitchColor, pitchTypeLabel, formatTime, formatDate, shortMethod, speedUnitLabel } from '../utils/conversions';
 import { generateCoachingComment } from '../utils/coaching';
 import { useSettings } from '../context/SettingsContext';
 
@@ -17,11 +17,8 @@ export default function PitchCard({ pitch, index, onViewTrajectory }: Props) {
   const unitLabel = speedUnitLabel(settings.speedUnit);
   const si = pitch?.speed_info || {};
 
-  const speed = si.release_speed_kmh
-    ? formatSpeed(si.release_speed_kmh, settings.speedUnit)
-    : si.initial_speed_kmh
-      ? formatSpeed(si.initial_speed_kmh, settings.speedUnit)
-      : null;
+  const kmh = getSpeedKmh(pitch);
+  const speed = kmh === null ? null : formatSpeed(kmh, settings.speedUnit);
   const maxSpeed = si.max_speed_kmh ? formatSpeed(si.max_speed_kmh, settings.speedUnit) : null;
   const distM = si.total_distance_m ?? si.effective_distance_m ?? null;
   const flightS = si.flight_time_s ?? null;
@@ -108,10 +105,10 @@ export default function PitchCard({ pitch, index, onViewTrajectory }: Props) {
           style={styles.trajectoryBtn}
           onPress={onViewTrajectory}
           accessibilityRole="button"
-          accessibilityLabel={`查看第 ${index} 球的 3D 軌跡模擬`}
+          accessibilityLabel={`查看第 ${index} 球的互動 3D 進壘回放`}
           activeOpacity={0.75}
         >
-          <Text style={styles.trajectoryBtnText}>查看 3D 軌跡</Text>
+          <Text style={styles.trajectoryBtnText}>查看互動 3D 回放</Text>
         </TouchableOpacity>
       )}
     </View>

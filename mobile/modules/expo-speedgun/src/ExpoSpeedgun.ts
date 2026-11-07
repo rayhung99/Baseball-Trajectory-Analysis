@@ -101,6 +101,7 @@ export interface NativeTrajectoryMetadata {
 }
 
 export interface NativeSpeedInfo {
+  error?: string;
   release_speed_kmh?: number;
   initial_speed_kmh?: number;
   max_speed_kmh?: number;

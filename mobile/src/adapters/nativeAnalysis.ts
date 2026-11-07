@@ -2,9 +2,17 @@ import type { NativeAnalysisResult } from '../../modules/expo-speedgun';
 import type { PitchResult } from '../types';
 
 export function toPitchResult(raw: NativeAnalysisResult): PitchResult {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('原生分析結果格式異常，請重新分析。');
   if (raw.error) throw new Error(raw.error);
 
-  const speedInfo = raw.speed_info || {};
+  const speedInfo = raw.speed_info;
+  if (!speedInfo || typeof speedInfo !== 'object' || Array.isArray(speedInfo)) {
+    throw new Error('原生分析結果缺少球速資料，請重新分析。');
+  }
+  if (speedInfo.error) throw new Error(speedInfo.error);
+  if (![speedInfo.release_speed_kmh, speedInfo.initial_speed_kmh].some(
+    (speed) => typeof speed === 'number' && Number.isFinite(speed) && speed > 0,
+  )) throw new Error('未取得有效球速，請確認影片能清楚看到投球過程後重試。');
   return {
     job_id: raw.job_id || `offline_${Date.now()}`,
     speed_info: {

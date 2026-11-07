@@ -56,35 +56,10 @@ const DEFAULT_MESSAGES: Record<string, string> = {
 };
 
 export function normalizePipelineProgress(event: NativeProgressEvent): PipelineProgressState {
-  const stageId = STAGE_MAP[event.stage] || event.stage;
-  const message = event.message || DEFAULT_MESSAGES[event.stage] || '處理中…';
-  let pct: number;
-
-  switch (stageId) {
-    case 'init':
-      pct = Math.round(event.progress * 5);
-      break;
-    case 'detection':
-      pct = 5 + Math.round(event.progress * 40);
-      break;
-    case 'tracking':
-      pct = 45 + Math.round(event.progress * 15);
-      break;
-    case 'speed':
-      pct = 60 + Math.round(event.progress * 5);
-      break;
-    case 'pitch_type':
-      pct = 65 + Math.round(event.progress * 5);
-      break;
-    case 'overlay':
-      pct = 70 + Math.round(event.progress * 28);
-      break;
-    case 'done':
-      pct = 100;
-      break;
-    default:
-      pct = Math.round(event.progress * 100);
-  }
-
-  return { stageId, message, pct: Math.min(pct, 100) };
+  const stageId = Object.hasOwn(STAGE_MAP, event.stage) ? STAGE_MAP[event.stage] : event.stage;
+  const message = event.message || (Object.hasOwn(DEFAULT_MESSAGES, stageId) ? DEFAULT_MESSAGES[stageId] : '處理中…');
+  // Native progress is already normalized across the entire pipeline.
+  const progress = Number.isFinite(event.progress) ? event.progress : 0;
+  const pct = stageId === 'done' ? 100 : Math.round(Math.max(0, Math.min(1, progress)) * 100);
+  return { stageId, message, pct };
 }

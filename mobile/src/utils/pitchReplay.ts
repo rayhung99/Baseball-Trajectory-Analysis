@@ -10,7 +10,6 @@ const DEFAULT_DISTANCE_M = 18.44;
 const DEFAULT_DURATION_S = 0.45;
 const DEFAULT_ZONE_WIDTH_M = 0.4318;
 const DEFAULT_ZONE_HEIGHT_M = 0.58;
-const DEFAULT_RELEASE_HEIGHT_M = 1.8;
 const PLATE_ZONE_CENTER_M = 0.9;
 export const PITCH_REPLAY_SCALE = 3;
 export const BASEBALL_RADIUS_M = 0.037;
@@ -31,8 +30,51 @@ export interface PitchReplayModel {
   durationS: number;
   estimatedRatio: number;
   isEstimated: boolean;
+  endpointCalibrated: boolean;
   confidenceLabel: string;
   warning: string;
+}
+
+export interface TunnelMetrics {
+  releaseSeparationCm: number;
+  midpointSeparationCm: number;
+  plateSeparationCm: number;
+  label: string;
+}
+
+function pointAtProgress(model: PitchReplayModel, progress: number): TrajectoryWorldPoint | null {
+  if (!model.points.length) return null;
+  const target = clamp(progress, 0, 1);
+  const nextIndex = model.points.findIndex((point) => point.t >= target);
+  if (nextIndex < 0) return model.points[model.points.length - 1];
+  if (nextIndex === 0) return model.points[0];
+  const before = model.points[nextIndex - 1];
+  const after = model.points[nextIndex];
+  const ratio = (target - before.t) / Math.max(1e-6, after.t - before.t);
+  return {
+    x: before.x + (after.x - before.x) * ratio,
+    y: before.y + (after.y - before.y) * ratio,
+    z: before.z + (after.z - before.z) * ratio,
+    t: target,
+  };
+}
+
+export function buildTunnelMetrics(primary: PitchReplayModel, comparison: PitchReplayModel): TunnelMetrics | null {
+  const separation = (progress: number) => {
+    const a = pointAtProgress(primary, progress);
+    const b = pointAtProgress(comparison, progress);
+    return a && b ? Math.hypot(a.x - b.x, a.y - b.y) * 100 : null;
+  };
+  const releaseSeparationCm = separation(0);
+  const midpointSeparationCm = separation(0.5);
+  const plateSeparationCm = separation(1);
+  if (releaseSeparationCm == null || midpointSeparationCm == null || plateSeparationCm == null) return null;
+  return {
+    releaseSeparationCm,
+    midpointSeparationCm,
+    plateSeparationCm,
+    label: midpointSeparationCm <= 10 ? '高度重疊' : midpointSeparationCm <= 20 ? '形成 Tunnel' : '中段已分離',
+  };
 }
 
 export function buildChallengeCallout(model: PitchReplayModel) {
@@ -206,6 +248,25 @@ function fillFrameGaps(samples: SourceSample[]): SourceSample[] {
   return filled;
 }
 
+function filterReplayOutliers(samples: SourceSample[]): SourceSample[] {
+  if (samples.length < 3) return samples;
+  return samples.filter((sample, index) => {
+    if (index === 0 || index === samples.length - 1) return true;
+    const previous = samples[index - 1];
+    const next = samples[index + 1];
+    const previousOrder = previous.time_s ?? previous.frame_index;
+    const currentOrder = sample.time_s ?? sample.frame_index;
+    const nextOrder = next.time_s ?? next.frame_index;
+    if (!finite(previousOrder) || !finite(currentOrder) || !finite(nextOrder) || nextOrder <= previousOrder) return true;
+    const t = clamp((currentOrder - previousOrder) / (nextOrder - previousOrder), 0, 1);
+    const expectedX = previous.x_norm + (next.x_norm - previous.x_norm) * t;
+    const expectedY = previous.y_norm + (next.y_norm - previous.y_norm) * t;
+    const deviation = Math.hypot(sample.x_norm - expectedX, sample.y_norm - expectedY);
+    const neighborTravel = Math.hypot(next.x_norm - previous.x_norm, next.y_norm - previous.y_norm);
+    return deviation <= Math.max(0.035, neighborTravel * 0.75);
+  });
+}
+
 function smoothReplayPoints(points: TrajectoryWorldPoint[]) {
   let smoothed = points;
   for (let pass = 0; pass < 3; pass++) {
@@ -271,6 +332,7 @@ export function buildPitchReplayModel(pitch: PitchResult): PitchReplayModel {
     source = 'legacy_points';
     samples = legacySamples(pitch);
   }
+  samples = filterReplayOutliers(samples);
 
   let durationS = durationFor(meta, samples, pitch);
   if (samples.length < 2) {
@@ -306,12 +368,56 @@ export function buildPitchReplayModel(pitch: PitchResult): PitchReplayModel {
   const lateralFromNorm = (xNorm: number) => ((xNorm - zoneCenterX) / zoneNormW) * zoneWidthM;
   const heightFromNorm = (yNorm: number) => PLATE_ZONE_CENTER_M + ((zoneCenterY - yNorm) / zoneNormH) * zoneHeightM;
 
+  const firstSample = samples[0];
+  const lastSample = samples[samples.length - 1];
+  const endpointCalibrated = finite(meta.release_point_x_m)
+    && finite(meta.release_point_y_m)
+    && finite(meta.plate_crossing_x_m)
+    && finite(meta.plate_crossing_y_m);
+  const releaseX = clamp(
+    finite(meta.release_point_x_m) ? meta.release_point_x_m : lateralFromNorm(firstSample.x_norm),
+    -3,
+    3,
+  );
+  const releaseY = clamp(
+    finite(meta.release_point_y_m) ? meta.release_point_y_m : heightFromNorm(firstSample.y_norm),
+    0.5,
+    3.2,
+  );
+  const releaseZ = clamp(
+    finite(meta.release_point_z_m) ? meta.release_point_z_m : distanceM,
+    0.5,
+    distanceM,
+  );
+  const crossingX = clamp(
+    finite(meta.plate_crossing_x_m) ? meta.plate_crossing_x_m : lateralFromNorm(plateX),
+    -2,
+    2,
+  );
+  const crossingY = clamp(
+    finite(meta.plate_crossing_y_m) ? meta.plate_crossing_y_m : heightFromNorm(plateY),
+    0.15,
+    2.2,
+  );
+
   let points = samples.map((sample, index): TrajectoryWorldPoint => {
     const t = progressFor(sample, index, samples, meta);
+    const expectedXNorm = firstSample.x_norm + (lastSample.x_norm - firstSample.x_norm) * t;
+    const expectedYNorm = firstSample.y_norm + (lastSample.y_norm - firstSample.y_norm) * t;
+    const lateralResidualM = clamp(
+      ((sample.x_norm - expectedXNorm) / zoneNormW) * zoneWidthM,
+      -zoneWidthM * 1.5,
+      zoneWidthM * 1.5,
+    );
+    const verticalResidualM = clamp(
+      ((expectedYNorm - sample.y_norm) / zoneNormH) * zoneHeightM,
+      -zoneHeightM * 1.5,
+      zoneHeightM * 1.5,
+    );
     return {
-      x: lateralFromNorm(sample.x_norm),
-      y: DEFAULT_RELEASE_HEIGHT_M * (1 - t) + heightFromNorm(sample.y_norm) * t,
-      z: distanceM * (1 - t),
+      x: releaseX + (crossingX - releaseX) * t + lateralResidualM,
+      y: releaseY + (crossingY - releaseY) * t + verticalResidualM,
+      z: releaseZ * (1 - t),
       t,
       time_s: t * durationS,
       frame_index: sample.frame_index,
@@ -321,8 +427,8 @@ export function buildPitchReplayModel(pitch: PitchResult): PitchReplayModel {
   });
 
   const landing = {
-    x: lateralFromNorm(plateX),
-    y: heightFromNorm(plateY),
+    x: crossingX,
+    y: crossingY,
   };
   const last = points[points.length - 1];
   const landingAdjusted = !!last && (Math.abs(last.x - landing.x) > 0.001 || Math.abs(last.y - landing.y) > 0.001 || last.t < 0.999);
@@ -340,12 +446,14 @@ export function buildPitchReplayModel(pitch: PitchResult): PitchReplayModel {
 
   const estimatedCount = points.filter((point) => point.is_synthetic).length;
   const estimatedRatio = points.length ? estimatedCount / points.length : 1;
-  const isEstimated = source !== 'native_samples' || landingAdjusted || estimatedCount > 0;
+  const isEstimated = !endpointCalibrated || source !== 'native_samples' || landingAdjusted || estimatedCount > 0;
   const isStrike = pitch.speed_info?.is_strike ?? meta.is_strike ?? null;
   const landingPoint = points.length ? { ...points[points.length - 1] } : null;
-  const confidenceLabel = !isEstimated ? '實測軌跡' : source === 'native_samples' ? '混合實測／補點' : source === 'legacy_points' ? '舊資料重建' : '落點重建';
-  const warning = source === 'native_samples'
-    ? '單鏡頭深度為視覺重建；實測時間與畫面軌跡優先。'
+  const confidenceLabel = !isEstimated ? '端點校正實測' : source === 'native_samples' ? '混合實測／補點' : source === 'legacy_points' ? '舊資料重建' : '落點重建';
+  const warning = endpointCalibrated
+    ? '已用原生出手點與進壘點校正；單鏡頭中段深度仍為視覺重建。'
+    : source === 'native_samples'
+      ? '缺少世界座標端點，深度由畫面與投打距離重建。'
     : '缺少完整逐幀資料，畫面已補足供回放參考。';
 
   return {
@@ -362,6 +470,7 @@ export function buildPitchReplayModel(pitch: PitchResult): PitchReplayModel {
     durationS,
     estimatedRatio,
     isEstimated,
+    endpointCalibrated,
     confidenceLabel,
     warning,
   };

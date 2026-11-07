@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import {
   View, Text, TextInput, TouchableOpacity, ScrollView, ActivityIndicator, StyleSheet,
   Alert, Linking, useWindowDimensions,
@@ -12,6 +12,7 @@ import { useSettings } from '../context/SettingsContext';
 import { useResult } from '../context/ResultContext';
 import { useOfflineAnalysis } from '../hooks/useOfflineAnalysis';
 import AnalysisProgress from '../components/AnalysisProgress';
+import GuidedCaptureModal from '../components/GuidedCaptureModal';
 import { friendlyError, isCancellation } from '../utils/errors';
 import { isManualDistanceCalibrated } from '../types';
 import type { StrikeZoneCalibration } from '../types';
@@ -77,6 +78,7 @@ export default function AnalyzeScreen() {
   const [batterHeightText, setBatterHeightText] = useState('');
   const [heightTouched, setHeightTouched] = useState(false);
   const [analyzing, setAnalyzing] = useState(false);
+  const analyzingRef = useRef(false);
   const [uploadPct, setUploadPct] = useState(0);
   const [currentStage, setCurrentStage] = useState<string | null>(null);
   const [stageMessages, setStageMessages] = useState<string[]>([]);
@@ -85,8 +87,13 @@ export default function AnalyzeScreen() {
   const [showRaw, setShowRaw] = useState(false);
   const [statusMsg, setStatusMsg] = useState('');
   const [statusType, setStatusType] = useState<'' | 'error' | 'success'>('');
+  const [showCapture, setShowCapture] = useState(false);
+  const metadataRequest = useRef(0);
+  const pickingVideo = useRef(false);
 
-  const batterHeightM = Number.parseFloat(batterHeightText);
+  useEffect(() => () => { metadataRequest.current += 1; }, []);
+
+  const batterHeightM = Number(batterHeightText);
   const hasValidBatterHeight = Number.isFinite(batterHeightM) && batterHeightM >= 1.0 && batterHeightM <= 2.4;
   const hasDistanceCalibration = isManualDistanceCalibrated(settings.moundDistanceM);
   const batterHeightError = heightTouched && batterHeightText.trim() !== '' && !hasValidBatterHeight;
@@ -103,57 +110,19 @@ export default function AnalyzeScreen() {
     setShowRaw(false);
   };
 
-  const pickVideo = useCallback(async () => {
-    const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
-    if (status !== 'granted') {
-      setStatusMsg('需要相簿存取權限才能選擇影片。');
-      setStatusType('error');
-      Alert.alert(
-        '權限未開啟',
-        '請到「設定 → SpeedGun → 照片」開啟相簿存取權。',
-        [
-          { text: '取消', style: 'cancel' },
-          { text: '開啟設定', onPress: () => Linking.openSettings() },
-        ],
-      );
-      return;
-    }
-
-    const result = await ImagePicker.launchImageLibraryAsync({
-      mediaTypes: ['videos'],
-      quality: 1,
-    });
-
-    if (result.canceled || !result.assets?.[0]) return;
-
-    const asset = result.assets[0];
-    try {
-      if (asset.fileSize) checkFileSize(asset.fileSize, MAX_MB);
-    } catch (e: any) {
-      setStatusMsg(e.message);
-      setStatusType('error');
-      return;
-    }
-
-    setVideoUri(asset.uri);
-    setVideoName(asset.fileName || 'video.mp4');
+  const selectVideo = (
+    uri: string,
+    name: string,
+    baseMeta: SelectedVideoMeta,
+  ) => {
+    const request = ++metadataRequest.current;
+    setVideoUri(uri);
+    setVideoName(name);
     resetAnalysis();
-    const sizeMB = asset.fileSize ? (asset.fileSize / 1024 / 1024).toFixed(1) : '?';
-    const durationS = asset.duration != null ? (asset.duration / 1000).toFixed(1) : '?';
-    const baseMeta: SelectedVideoMeta = {
-      sizeMB,
-      durationS,
-      width: asset.width,
-      height: asset.height,
-      metadataPending: true,
-    };
-    setVideoMeta(baseMeta);
-    getVideoMetadata(asset.uri)
+    setVideoMeta({ ...baseMeta, metadataPending: true });
+    getVideoMetadata(uri)
       .then((meta: VideoMetadata) => {
-        if (meta.error) {
-          setVideoMeta((prev) => prev ? { ...prev, metadataPending: false } : prev);
-          return;
-        }
+        if (request !== metadataRequest.current) return;
         setVideoMeta((prev) => prev ? {
           ...prev,
           durationS: meta.duration_s != null ? meta.duration_s.toFixed(1) : prev.durationS,
@@ -169,20 +138,67 @@ export default function AnalyzeScreen() {
         } : prev);
       })
       .catch(() => {
-        setVideoMeta((prev) => prev ? { ...prev, metadataPending: false } : prev);
+        if (request === metadataRequest.current) setVideoMeta((prev) => prev ? { ...prev, metadataPending: false } : prev);
       });
-    setStatusMsg(`✓ ${asset.fileName || 'Video selected'}`);
+    setStatusMsg(`✓ ${name}`);
     setStatusType('success');
-  }, []);
+  };
+
+  const pickVideo = async () => {
+    if (pickingVideo.current) return;
+    pickingVideo.current = true;
+    try {
+      const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
+      if (status !== 'granted') {
+        setStatusMsg('需要相簿存取權限才能選擇影片。');
+        setStatusType('error');
+        Alert.alert(
+          '權限未開啟',
+          '請到「設定 → PitchMotion → 照片」開啟相簿存取權。',
+          [
+            { text: '取消', style: 'cancel' },
+            { text: '開啟設定', onPress: () => Linking.openSettings() },
+          ],
+        );
+        return;
+      }
+
+      const result = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ['videos'],
+        quality: 1,
+      });
+      if (result.canceled || !result.assets?.[0]) return;
+
+      const asset = result.assets[0];
+      if (asset.fileSize) checkFileSize(asset.fileSize, MAX_MB);
+      selectVideo(asset.uri, asset.fileName || 'video.mp4', {
+        sizeMB: asset.fileSize ? (asset.fileSize / 1024 / 1024).toFixed(1) : '?',
+        durationS: asset.duration != null ? (asset.duration / 1000).toFixed(1) : '?',
+        width: asset.width,
+        height: asset.height,
+      });
+    } catch (error) {
+      setStatusMsg(friendlyError(error, { action: '選擇影片' }) ?? '無法開啟相簿，請稍後重試。');
+      setStatusType('error');
+    } finally {
+      pickingVideo.current = false;
+    }
+  };
+
+  const handleCaptured = (uri: string) => {
+    setShowCapture(false);
+    selectVideo(uri, '引導拍攝影片.mov', { sizeMB: '?', durationS: '?' });
+  };
 
   const onAnalyzeOffline = async () => {
-    if (!videoUri || analyzing || !hasValidBatterHeight) return;
+    if (!videoUri || analyzingRef.current || !hasValidBatterHeight) return;
+    analyzingRef.current = true;
     setAnalyzing(true);
     resetAnalysis();
     const initEntry = { msg: '本機分析已開始', isError: false };
     rawLogsRef.current = [...rawLogsRef.current.slice(-200), initEntry];
     setRawLogs(rawLogsRef.current);
-    setUploadPct(100);
+    setUploadPct(0);
     setCurrentStage('init');
     setStatusMsg('');
     setStatusType('');
@@ -228,6 +244,7 @@ export default function AnalyzeScreen() {
         setStatusType('error');
       }
     } finally {
+      analyzingRef.current = false;
       setAnalyzing(false);
     }
   };
@@ -282,6 +299,7 @@ export default function AnalyzeScreen() {
 
   return (
     <ScrollView style={styles.scroll} contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled" nestedScrollEnabled>
+      <GuidedCaptureModal visible={showCapture} onClose={() => setShowCapture(false)} onCaptured={handleCaptured} />
       {analyzing ? (
         <View style={[styles.responsivePane, { width: panelWidth, marginTop: 16 }]}>
           <AnalysisProgress
@@ -328,16 +346,28 @@ export default function AnalyzeScreen() {
                 <Text style={styles.sectionTitle}>影片</Text>
                 <Text style={styles.sectionSub} numberOfLines={1}>{videoUri ? videoName : `MP4 或 MOV，最多 ${MAX_MB}MB`}</Text>
               </View>
-              <TouchableOpacity
-                style={styles.secondaryButton}
-                onPress={pickVideo}
-                activeOpacity={0.75}
-                accessibilityRole="button"
-                accessibilityLabel={videoUri ? '更換投球影片' : '從相簿選擇投球影片'}
-              >
-                <Ionicons name={videoUri ? 'swap-horizontal-outline' : 'add-outline'} size={18} color={Colors.accent} />
-                <Text style={styles.secondaryButtonText}>{videoUri ? '更換' : '選擇'}</Text>
-              </TouchableOpacity>
+              <View style={styles.sectionActions}>
+                <TouchableOpacity
+                  style={styles.secondaryButton}
+                  onPress={() => setShowCapture(true)}
+                  activeOpacity={0.75}
+                  accessibilityRole="button"
+                  accessibilityLabel="開啟投球引導拍攝"
+                >
+                  <Ionicons name="camera-outline" size={18} color={Colors.accent} />
+                  <Text style={styles.secondaryButtonText}>拍攝</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={styles.secondaryButton}
+                  onPress={pickVideo}
+                  activeOpacity={0.75}
+                  accessibilityRole="button"
+                  accessibilityLabel={videoUri ? '更換投球影片' : '從相簿選擇投球影片'}
+                >
+                  <Ionicons name={videoUri ? 'swap-horizontal-outline' : 'add-outline'} size={18} color={Colors.accent} />
+                  <Text style={styles.secondaryButtonText}>{videoUri ? '更換' : '相簿'}</Text>
+                </TouchableOpacity>
+              </View>
             </View>
 
             {videoUri ? (
@@ -358,7 +388,7 @@ export default function AnalyzeScreen() {
                 {videoMeta && (
                   <View style={styles.videoDetails}>
                     <Text style={styles.videoDetailsText}>
-                      {resolutionLabel} · {videoMeta.fps ? `${videoMeta.fps} fps` : '讀取影片資訊中'}
+                      {resolutionLabel} · {videoMeta.fps ? `${videoMeta.fps} fps` : videoMeta.metadataPending ? '讀取影片資訊中' : '無法讀取幀率'}
                     </Text>
                   </View>
                 )}
@@ -437,7 +467,7 @@ export default function AnalyzeScreen() {
               <Text style={[styles.heightHint, batterHeightError && { color: Colors.red }]}>
                 {batterHeightError
                   ? '請輸入 1.00 到 2.40 公尺之間的身高'
-                  : needsHeight ? '輸入後即可開始分析。' : `好球帶高度約 ${zoneHeightCm?.toFixed(1)} cm。`}
+                  : !hasValidBatterHeight ? '輸入後即可開始分析。' : `好球帶高度約 ${zoneHeightCm?.toFixed(1)} cm。`}
               </Text>
             </View>
 
@@ -605,6 +635,10 @@ const styles = StyleSheet.create({
   sectionTitleWrap: {
     flex: 1,
     minWidth: 0,
+  },
+  sectionActions: {
+    flexDirection: 'row',
+    gap: Spacing.sm,
   },
   sectionTitle: {
     color: Colors.text,

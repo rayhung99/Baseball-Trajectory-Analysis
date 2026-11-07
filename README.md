@@ -1,131 +1,162 @@
-# SpeedGun — iOS 棒球投球分析
+<p align="center">
+  <img src="docs/assets/readme-header.svg" alt="PitchMotion — on-device pitch lab" width="920">
+</p>
 
-SpeedGun 是一款全程在 iPhone 裝置端運行的棒球投球分析 App。系統以 Core ML、AVFoundation 與 Swift 分析投球影片，再由 Expo React Native 呈現球速、球種、好球帶落點、位移量與進壘軌跡。
+<p align="center">
+  <strong>把每一球，變成看得懂的軌跡。</strong><br>
+  <sub>iPhone 上的全裝置端棒球投球分析 App</sub>
+</p>
 
-目前專案只提供 iOS App；影片與分析結果不需要上傳伺服器。
+<p align="center">
+  <sub><a href="#安裝到-iphone">安裝到 iPhone</a> · <a href="#核心功能">核心功能</a> · <a href="#架構">架構</a> · <a href="#分析流程">分析流程</a> · <a href="#架構邊界">架構邊界</a> · <a href="#專案結構">專案結構</a></sub>
+</p>
 
-## 功能
+<table>
+  <tr>
+    <td width="64%" valign="top">
+      <sub>BUILT FOR THE MOUND</sub><br><br>
+      <strong>從一段投球影片，讀懂速度、球路與進壘位置。</strong><br><br>
+      PitchMotion 使用 Swift、Core ML、AVFoundation 與 Metal 分析影片，再由 Expo React Native 呈現每一球的完整結果。
+    </td>
+    <td width="36%" valign="top">
+      <sub>PRIVACY BY DESIGN</sub><br><br>
+      <strong>100% 裝置端分析</strong><br><br>
+      影片不需上傳伺服器，也不需要帳號或網路連線。
+    </td>
+  </tr>
+</table>
 
-### 投球分析
+<a id="安裝到-iphone"></a>
+<p align="center"><img src="docs/assets/readme-section-install.svg" alt="00 安裝到 iPhone" width="920"></p>
 
-| 功能 | 說明 |
-|------|------|
-| 棒球偵測 | 使用 Core ML YOLO 逐幀辨識棒球位置 |
-| 姿勢估測 | 輔助判斷投手、出手點與投球階段 |
-| 物件追蹤 | 使用 SORT 串接偵測點並排除不合理候選 |
-| 低幀率補間 | 對 30／60 FPS 影片提高分析密度，改善快速位移追蹤 |
-| 軌跡修復 | 補齊漏偵區段並平滑顯示軌跡，同時保留實測與估算標記 |
-| 球速計算 | 依手動量測距離、原始影片時間戳、出手／接球時點與 TTC 交叉驗證計算 |
-| 球種辨識 | 綜合球速、位移與軌跡特徵判斷直球、曲球、滑球及變速球 |
-| 位移量 | 計算水平位移、垂直位移、Induced Vertical Break 與總位移 |
-| MLB ABS 好球帶 | 依打者身高建立好球帶，支援 2D／3D 外部校正資料 |
-| 分析品質 | 顯示偵測覆蓋率、實測點比例、落點信心與位移信心 |
+> [!IMPORTANT]
+> PitchMotion 目前只開放 iOS。請使用 Mac、Xcode 與自己的 Apple Account 簽署安裝；不提供 Android 版本，也不提供可直接安裝的未簽署 IPA。
 
-### 視覺化與回放
-
-| 功能 | 說明 |
-|------|------|
-| MLB ABS 進壘動畫 | 依實測／補點軌跡播放球路，鏡頭貼近好球帶旋轉並停在投手面向打者的視角 |
-| 落點判定 | 球到達終點後固定保留；好球不顯示距離，壞球顯示球體邊緣到好球帶邊緣的距離 |
-| 動畫控制 | 支援播放、暫停、慢速與重新播放；軌跡線在鏡頭旋轉完成後隱藏 |
-| 3D 進壘軌跡 | 與進壘動畫共用同一份軌跡模型，可旋轉、縮放、切換視角及比較上一球 |
-| Break Chart | 以 MLB 風格 X／Y 圖表呈現水平位移與 Induced Vertical Break |
-| Overlay 影片 | 在原始影片疊加球路、球速與好球帶資訊 |
-
-### 使用者資料
-
-- 從照片圖庫選取投球影片。
-- 在本機保存投球紀錄、設定與分析結果。
-- 支援單球詳情、上一球比較與結果分享。
-- 分析流程不需要帳號、後端服務或網路連線。
-
-## 架構
-
-### 系統分層
-
-| 層級 | 位置 | 責任 |
-|------|------|------|
-| UI | `mobile/src/screens`、`mobile/src/components` | 分析操作、結果呈現、動畫、3D 軌跡與歷史紀錄 |
-| 應用狀態 | `mobile/src/hooks`、`mobile/src/context` | 分析工作、播放時鐘、相機互動、設定與本機紀錄 |
-| 資料轉接 | `mobile/src/adapters/nativeAnalysis.ts` | 將 Swift 原生結果正規化為 App 使用的 `PitchResult` |
-| JS／Native Bridge | `mobile/modules/expo-speedgun/src` | 定義 React Native 呼叫原生分析模組的介面 |
-| 原生分析核心 | `mobile/modules/expo-speedgun/ios` | 影片解碼、AI 推論、追蹤、球速、球種、落點與 overlay 產生 |
-| 裝置能力 | Core ML、AVFoundation、Metal、MediaPipe | 模型推論、影音時間軸、影格補間與姿勢估測 |
-
-### 分析資料流
-
-```mermaid
-flowchart LR
-    A["投球影片"] --> B["解碼與時間戳"]
-    B --> C["影格補間"]
-    C --> D["YOLO 球體偵測"]
-    C --> E["Pose 姿勢估測"]
-    D --> F["SORT 追蹤與軌跡修復"]
-    E --> G["出手點候選"]
-    F --> H["出手／接球時點"]
-    G --> H
-    H --> I["球速與物理檢核"]
-    F --> J["落點、Break、球種"]
-    I --> K["PitchResult"]
-    J --> K
-    K --> L["結果頁、進壘回放、3D 軌跡、歷史紀錄"]
+```bash
+git clone https://github.com/wenglien/PitchMotion.git
+cd PitchMotion/mobile
+npm ci
+npx expo prebuild --platform ios
+npx pod-install
+open ios/PitchMotion.xcworkspace
 ```
 
-### 原生分析核心
+在 Xcode 選擇自己的 Team、設定唯一的 Bundle Identifier，連接 iPhone 並以 `Release` configuration 執行。完整需求、簽署步驟與疑難排解請見 **[iPhone 安裝指南](docs/install-ios.md)**。
 
-| 模組 | 責任 |
-|------|------|
-| `SpeedgunPipeline.swift` | 編排完整分析流程並彙整結果 |
-| `VideoDecoder.swift` | 讀取影格、FPS、解析度與原始影片時間戳 |
-| `FrameInterpolator.swift`／`FrameInterpolator.metal` | 低 FPS 影片影格補間 |
-| `YOLODetector.swift` | Core ML 棒球偵測 |
-| `PoseEstimator.swift`／`ReleasePointDetector.swift` | 姿勢估測與出手點候選 |
-| `SORTTracker.swift`／`TrajectoryMath.swift` | 軌跡關聯、補點與擬合 |
-| `BallSpeedCalculator.swift` | 飛行時間、TTC、距離與球速計算 |
-| `PlatePositionEstimator.swift`／`StrikeZoneCalibration.swift` | 本壘板位置、落點與好球帶座標轉換 |
-| `BallKinematics.swift`／`PitchClassifier.swift` | 位移量、Break 與球種辨識 |
-| `ABSStrikeZoneRenderer.swift`／`OverlayGenerator.swift` | 好球帶與分析影片輸出 |
-| `Types.swift` | 原生共用型別、常數與結果資料結構 |
+<a id="核心功能"></a>
+<p align="center"><img src="docs/assets/readme-section-features.svg" alt="01 核心功能" width="920"></p>
 
-### App 顯示層
+<table>
+  <tr>
+    <td width="50%" valign="top">
+      <sub>01 · DETECT</sub>
+      <h3>投球分析</h3>
+      YOLO 棒球偵測、Pose 出手點判斷、SORT 追蹤、漏偵補點與軌跡平滑。
+    </td>
+    <td width="50%" valign="top">
+      <sub>02 · REPLAY</sub>
+      <h3>互動進壘回放</h3>
+      MLB ABS 風格球路，支援播放、暫停、慢速、時間軸、自由旋轉、縮放與上一球比較。
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" valign="top">
+      <sub>03 · MEASURE</sub>
+      <h3>球速與球種</h3>
+      依原始時間戳、出手／接球時點、投打距離與 TTC 檢核計算球速，並辨識主要球種。
+    </td>
+    <td width="50%" valign="top">
+      <sub>04 · REVIEW</sub>
+      <h3>分析結果</h3>
+      顯示偵測覆蓋率、實測／補點比例、分析品質及疊加軌跡影片。
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" valign="top">
+      <sub>05 · LOCATE</sub>
+      <h3>落點與位移</h3>
+      提供 MLB ABS 好球帶、好壞球判定、水平／垂直位移、IVB 與 Break Chart。
+    </td>
+    <td width="50%" valign="top">
+      <sub>06 · KEEP</sub>
+      <h3>本機資料</h3>
+      保存投球紀錄與設定，不需要帳號、後端服務或網路連線。
+    </td>
+  </tr>
+</table>
 
-| 模組 | 責任 |
-|------|------|
-| `AnalyzeScreen.tsx` | 影片選取、規格顯示、校正輸入與分析啟動 |
-| `ResultScreen.tsx` | 球速、球種、落點、品質、Break 與回放結果 |
-| `PitchReplay.tsx` | MLB ABS 風格進壘動畫與邊緣距離標示 |
-| `Trajectory3DView.tsx` | 可操作的 3D 球路與上一球比較 |
-| `pitchReplay.ts` | 將原生軌跡轉為回放共用的世界座標模型 |
-| `trajectoryProjection.ts` | 3D 世界座標、相機與 2D 畫面投影 |
-| `HistoryScreen.tsx`／`SessionDetailScreen.tsx` | 本機歷史與單次投球詳情 |
-| `SettingsScreen.tsx` | 距離、好球帶、偵測與顯示設定 |
+<a id="架構"></a>
+<p align="center"><img src="docs/assets/readme-section-architecture.svg" alt="02 架構" width="920"></p>
 
-### 架構邊界
+|  | 模組與責任 | 程式位置 |
+|:---:|---|---|
+| `01` | **介面層 · App UI**<br><sub>分析操作、結果、互動回放與歷史紀錄</sub> | `mobile/src/screens`<br>`mobile/src/components` |
+| `02` | **狀態層 · App State**<br><sub>分析工作、播放、相機、設定與本機資料</sub> | `mobile/src/hooks`<br>`mobile/src/context` |
+| `03` | **轉接層 · Data Adapter**<br><sub>將原生結果正規化為 PitchResult</sub> | `mobile/src/adapters/nativeAnalysis.ts` |
+| `04` | **橋接層 · Native Bridge**<br><sub>React Native 與 iOS 核心的型別化介面</sub> | `mobile/modules/expo-speedgun/src` |
+| `05` | **運算層 · iOS Core**<br><sub>影片解碼、模型推論、追蹤、球速、球種、落點與 overlay</sub> | `mobile/modules/expo-speedgun/ios` |
+| `R&D` | **研究區 · Analysis Research**<br><sub>電腦視覺參考實作；不進入 App 執行路徑</sub> | `research` |
 
-- Swift 原生分析核心是球速、落點、Break 與球種的唯一計算來源。
-- TypeScript adapter 只負責資料正規化，不重新計算原生分析結果。
-- 回放層的補點與平滑只影響動畫呈現，不會回寫或改變球速計算。
-- 進壘動畫與 3D 軌跡共用 `PitchReplayModel`，避免同一球產生兩套不同路徑。
-- 設定、歷史與影片處理皆保留在裝置端，App 沒有伺服器分析依賴。
+<a id="分析流程"></a>
+<p align="center"><img src="docs/assets/readme-section-flow.svg" alt="03 分析流程" width="920"></p>
 
-### 專案結構
+| 階段 | 處理內容 | 產出 |
+|:---:|---|---|
+| `01` | **讀取 · INGEST**<br><sub>影片解碼與原始時間戳</sub> | 逐幀影像 |
+| `02` | **辨識 · DETECT**<br><sub>棒球偵測與姿勢估測</sub> | 球與人體座標 |
+| `03` | **重建 · RECONSTRUCT**<br><sub>追蹤、漏偵補點與軌跡擬合</sub> | 連續球路 |
+| `04` | **計算 · MEASURE**<br><sub>出手／接球時點與球速檢核</sub> | 可信球速 |
+| `05` | **判讀 · CLASSIFY**<br><sub>落點、位移與球種辨識</sub> | 投球特徵 |
+| `06` | **統一 · NORMALIZE**<br><sub>原生結果轉為共用資料模型</sub> | `PitchResult` |
+| `07` | **呈現 · PRESENT**<br><sub>結果頁、互動進壘回放與歷史紀錄</sub> | 使用者體驗 |
+
+<a id="架構邊界"></a>
+<p align="center"><img src="docs/assets/readme-section-boundaries.svg" alt="04 架構邊界" width="920"></p>
+
+> <sub>RULE 01 · SOURCE OF TRUTH</sub>
+>
+> ### 單一計算來源
+>
+> Swift 負責球速、落點、位移與球種；TypeScript 只做資料轉接與顯示。
+
+> <sub>RULE 02 · DATA ≠ MOTION</sub>
+>
+> ### 數據與動畫分離
+>
+> 動畫補點和平滑只改變畫面；2D 與互動 3D 共用 `PitchReplayModel`，不改寫原始分析數據。
+
+> <sub>RULE 03 · ON DEVICE</sub>
+>
+> ### 資料留在裝置端
+>
+> 分析、影片、投球紀錄與使用者設定皆保留在 iPhone。
+
+<a id="專案結構"></a>
+<p align="center"><img src="docs/assets/readme-section-structure.svg" alt="05 專案結構" width="920"></p>
+
+<sub>REPOSITORY MAP · 3 WORKSPACES</sub>
 
 ```text
-speedgun-mobile/
+speedgun-mobile/                     # ROOT
 ├── mobile/
 │   ├── src/
-│   │   ├── screens/                 # App 頁面
-│   │   ├── components/              # 分析結果與視覺化元件
-│   │   ├── hooks/                   # 分析、歷史、動畫與相機狀態
-│   │   ├── context/                 # 設定與結果共享狀態
-│   │   ├── adapters/                # 原生結果轉接
-│   │   └── utils/                   # 回放模型、投影與格式轉換
+│   │   ├── entry/                   # ENTRY · App 與 Expo 啟動入口
+│   │   ├── screens/                 # SCREENS · 分析、結果與設定頁面
+│   │   ├── components/              # UI · 共用元件與互動回放
+│   │   └── hooks/                   # STATE · 分析與播放狀態
 │   └── modules/expo-speedgun/
-│       ├── src/                     # TypeScript bridge
-│       ├── ios/                     # Swift／Metal 原生分析核心
-│       └── Resources/               # Core ML 與姿勢模型
-├── pitch_classifier/                # 球種分類研究工具
-├── src/                             # Python CV／overlay 研究工具
-├── scripts/                         # 開發輔助腳本
-└── yolov26n/                        # YOLO 訓練資料與研究資產
+│       ├── src/                     # BRIDGE · TypeScript 介面
+│       └── ios/                     # CORE · Swift／Metal 分析核心
+│           ├── Detection/           # DETECT · 球與姿勢辨識
+│           ├── Tracking/            # TRACK · 球體追蹤與軌跡選擇
+│           ├── Measurement/         # MEASURE · 球速、球種與落點
+│           ├── Rendering/           # RENDER · Overlay 與進壘呈現
+│           ├── Pipeline/            # PIPELINE · 分析流程協調
+│           ├── Support/             # SUPPORT · 影片與診斷支援
+│           └── Resources/           # MODELS · App 使用的模型與參數
+├── research/
+│   ├── vision/                      # R&D · 電腦視覺參考實作
+│   └── pitch_classifier/            # R&D · 規則式球種分類
+├── scripts/                         # TOOLS · 開發、診斷與資料處理
+└── docs/                            # DOCS · 技術文件
 ```

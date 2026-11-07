@@ -1,4 +1,4 @@
-import type { StrikeZoneGeometry } from './pitchReplay';
+import type { PitchReplayModel, StrikeZoneGeometry } from './pitchReplay';
 import type { TrajectoryWorldPoint } from '../types';
 
 export const VIEW_W = 340;
@@ -19,6 +19,8 @@ export const MIN_ZOOM = 0.55;
 export const MAX_ZOOM = 4.5;
 export const YAW_SENS = 0.42;
 export const PITCH_SENS = 0.34;
+const MAX_GESTURE_VELOCITY = 2500;
+const INERTIA_DECAY_PER_60HZ_FRAME = 0.88;
 
 export interface WorldPoint {
   x: number;
@@ -39,6 +41,8 @@ export interface Camera {
   zoom: number;
   panX: number;
   panY: number;
+  /** World-space look-at point; omitted preserves the ABS projection. */
+  target?: WorldPoint;
 }
 
 export interface CameraBasis {
@@ -49,6 +53,7 @@ export interface CameraBasis {
   fScale: number;
   panX: number;
   panY: number;
+  target?: WorldPoint;
 }
 
 export interface ViewPreset {
@@ -85,6 +90,28 @@ export function normalizeYaw(yaw: number) {
   return y;
 }
 
+export function normalizeCamera(camera: Camera): Camera {
+  return {
+    yaw: normalizeYaw(camera.yaw),
+    pitch: clamp(camera.pitch, -8, 88),
+    zoom: clamp(camera.zoom, MIN_ZOOM, MAX_ZOOM),
+    panX: clamp(camera.panX, -VIEW_W, VIEW_W),
+    panY: clamp(camera.panY, -VIEW_H, VIEW_H),
+    ...(camera.target ? { target: camera.target } : {}),
+  };
+}
+
+export function cameraVelocityFromGesture(velocityX: number, velocityY: number) {
+  return {
+    yaw: clamp(velocityX, -MAX_GESTURE_VELOCITY, MAX_GESTURE_VELOCITY) * YAW_SENS / 1000,
+    pitch: -clamp(velocityY, -MAX_GESTURE_VELOCITY, MAX_GESTURE_VELOCITY) * PITCH_SENS / 1000,
+  };
+}
+
+export function decayCameraVelocity(value: number, elapsedMs: number) {
+  return value * Math.pow(INERTIA_DECAY_PER_60HZ_FRAME, clamp(elapsedMs, 0, 50) / (1000 / 60));
+}
+
 /** Shortest arc interpolation — catcher→pitcher goes through ±180, not 540°. */
 export function lerpYaw(from: number, to: number, t: number) {
   const delta = ((to - from + 540) % 360) - 180;
@@ -106,14 +133,17 @@ export function buildCameraBasis(cam: Camera): CameraBasis {
     fScale: FOCAL * cam.zoom,
     panX: cam.panX,
     panY: cam.panY,
+    target: cam.target,
   };
 }
 
 export function projectWorld(p: WorldPoint, distanceM: number, basis: CameraBasis): ScreenPoint {
-  const zN = distanceM > 0 ? clamp(p.z / distanceM, 0, 1) : 0;
-  const sx = p.x * LAT_SCALE;
-  const sy = (p.y - PIVOT_HEIGHT_M) * HEIGHT_SCALE;
-  const sz = (0.5 - zN) * 2 * HALF_DEPTH;
+  const zN = distanceM > 0 ? p.z / distanceM : 0;
+  const sx = (p.x - (basis.target?.x ?? 0)) * LAT_SCALE;
+  const sy = (p.y - (basis.target?.y ?? PIVOT_HEIGHT_M)) * HEIGHT_SCALE;
+  const sz = (basis.target && distanceM > 0
+    ? basis.target.z / distanceM - zN
+    : 0.5 - clamp(zN, 0, 1)) * 2 * HALF_DEPTH;
 
   const x1 = sx * basis.cYaw + sz * basis.sYaw;
   const z1 = -sx * basis.sYaw + sz * basis.cYaw;
@@ -131,6 +161,61 @@ export function projectWorld(p: WorldPoint, distanceM: number, basis: CameraBasi
     depth: z2,
     scale: f / BASE_F,
   };
+}
+
+/** Interpolate the observer, never rotate or rewrite trajectory samples. */
+export function interpolateCamera(from: Camera, to: Camera, progress: number): Camera {
+  const t = clamp(progress, 0, 1);
+  const mix = (a: number, b: number) => a + (b - a) * t;
+  return {
+    yaw: lerpYaw(from.yaw, to.yaw, t),
+    pitch: mix(from.pitch, to.pitch),
+    zoom: mix(from.zoom, to.zoom),
+    panX: mix(from.panX, to.panX),
+    panY: mix(from.panY, to.panY),
+    ...(from.target && to.target ? { target: {
+      x: mix(from.target.x, to.target.x),
+      y: mix(from.target.y, to.target.y),
+      z: mix(from.target.z, to.target.z),
+    } } : {}),
+  };
+}
+
+export function buildReplayCameraFrames(primary: PitchReplayModel, comparisons: PitchReplayModel[], viewHeight: number) {
+  const models = [primary, ...comparisons.slice(0, 5)];
+  const distanceM = Math.max(...models.map((model) => model.distanceM));
+  const world = buildStaticWorldScene(distanceM, primary.strikeZone);
+  const target = { x: 0, y: PIVOT_HEIGHT_M, z: distanceM / 2 };
+  const points = [...world.lane, ...world.strikeZone, ...models.flatMap((model) => model.points)];
+  // A sphere fit keeps the entire system in frame through a full orbit.
+  const radius = Math.max(1, ...points.map((point) => Math.hypot(
+    (point.x - target.x) * LAT_SCALE,
+    (point.y - target.y) * HEIGHT_SCALE,
+    (point.z - target.z) / distanceM * 2 * HALF_DEPTH,
+  )));
+  const margin = 28;
+  const overview: Camera = {
+    ...DEFAULT_CAMERA,
+    yaw: 135,
+    pitch: 24,
+    zoom: clamp((Math.min(VIEW_W, viewHeight) / 2 - margin) * Math.sqrt(Math.max(1, CAM_DIST ** 2 - radius ** 2)) / (FOCAL * radius), MIN_ZOOM, 2.05),
+    panY: viewHeight / 2 - CENTER_Y,
+    target,
+  };
+  const zone: Camera = {
+    ...overview,
+    yaw: 180,
+    pitch: 6,
+    zoom: 1,
+    target: { x: 0, y: primary.strikeZone.centerYM, z: 0 },
+  };
+  const basis = buildCameraBasis(zone);
+  const outcomes = [...world.strikeZone, ...models.flatMap((model) => model.landingPoint ? [model.landingPoint] : [])]
+    .map((point) => projectWorld(point, distanceM, basis));
+  const halfWidth = Math.max(1, ...outcomes.map((point) => Math.abs(point.x - CENTER_X)));
+  const halfHeight = Math.max(1, ...outcomes.map((point) => Math.abs(point.y - viewHeight / 2)));
+  zone.zoom = Math.min(7, (VIEW_W / 2 - margin) / halfWidth, (viewHeight / 2 - margin) / halfHeight);
+  return { overview, zone, distanceM };
 }
 
 export function ground(x: number, z: number): WorldPoint {
@@ -173,9 +258,9 @@ export function sampleAtProgress(
   if (points.length === 0) return { x: CENTER_X, y: CENTER_Y, depth: 0, scale: 1 };
   if (points.length === 1) return points[0];
   const target = clamp(progress, 0, 1);
-  let next = timeline.findIndex((point) => point.t >= target);
-  if (next <= 0) return points[0];
+  const next = timeline.findIndex((point) => point.t >= target);
   if (next < 0) return points[points.length - 1];
+  if (next === 0) return points[0];
   const i = next - 1;
   const span = timeline[next].t - timeline[i].t;
   const local = span > 0 ? (target - timeline[i].t) / span : 0;

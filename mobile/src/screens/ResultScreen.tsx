@@ -4,7 +4,7 @@ import * as Sharing from 'expo-sharing';
 import { Colors, Spacing, Radius, FontSize, Layout, Shadows, Surfaces } from '../theme';
 import VideoPlayer from '../components/VideoPlayer';
 import { useResult } from '../context/ResultContext';
-import { formatSpeed, pitchColor, pitchTypeLabel, shortMethod, speedUnitLabel } from '../utils/conversions';
+import { formatSpeed, getSpeedKmh, pitchColor, pitchTypeLabel, shortMethod, speedUnitLabel } from '../utils/conversions';
 import PitchReplay from '../components/PitchReplay';
 import BreakChart from '../components/BreakChart';
 import { friendlyError } from '../utils/errors';
@@ -44,7 +44,7 @@ export default function ResultScreen() {
   const analysis = result ?? EMPTY_RESULT;
 
   const si = analysis.speed_info || {};
-  const primaryKmh = si.release_speed_kmh ?? si.initial_speed_kmh ?? null;
+  const primaryKmh = getSpeedKmh(analysis);
   const speedUnit = settings.speedUnit;
   const speedUnitText = speedUnitLabel(speedUnit);
   const alternateUnit = speedUnit === 'mph' ? 'kmh' : 'mph';
@@ -179,7 +179,7 @@ export default function ResultScreen() {
     navigation.navigate('TrajectorySimulation', {
       pitch: result,
       comparePitch: previousPitch ?? undefined,
-      title: '本球 3D 軌跡',
+      title: '本球互動 3D 回放',
     });
   }, [navigation, previousPitch, result]);
 
@@ -321,10 +321,10 @@ export default function ResultScreen() {
           style={styles.trajectoryHeroBtn}
           onPress={handleOpenTrajectory}
           accessibilityRole="button"
-          accessibilityLabel="查看本球 3D 軌跡模擬"
+          accessibilityLabel="查看本球互動 3D 進壘回放"
           activeOpacity={0.78}
         >
-          <Text style={styles.trajectoryHeroBtnText}>查看 3D 軌跡模擬</Text>
+          <Text style={styles.trajectoryHeroBtnText}>查看互動 3D 回放</Text>
         </TouchableOpacity>
       </View>
 
@@ -420,7 +420,7 @@ export default function ResultScreen() {
         </View>
         <View style={styles.divider} />
         <View style={styles.visualWrap}>
-          <PitchReplay pitch={analysis} previousPitch={previousPitch} />
+          <PitchReplay key={analysis.job_id} pitch={analysis} previousPitch={previousPitch} />
         </View>
         {zoneWidthCm !== null && zoneHeightCm !== null && (
           <Text style={styles.zoneRuleText}>
