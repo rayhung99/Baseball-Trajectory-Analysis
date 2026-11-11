@@ -1,0 +1,56 @@
+name: Build iOS App
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      
+      - name: Install CocoaPods
+        run: |
+          sudo gem install cocoapods
+      
+      - name: Install dependencies
+        run: |
+          cd mobile
+          npm ci
+          npx expo prebuild --platform ios
+          cd ios && pod install && cd ..
+      
+      - name: Build with xcodebuild
+        run: |
+          cd mobile/ios
+          xcodebuild \
+            -workspace PitchMotion.xcworkspace \
+            -scheme PitchMotion \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath build \
+            -archivePath build/PitchMotion.xcarchive \
+            CODE_SIGNING_ALLOWED=NO \
+            archive
+      
+      - name: Package IPA
+        run: |
+          cd mobile/ios
+          mkdir -p build/export/Payload
+          cp -r build/PitchMotion.xcarchive/Products/Applications/PitchMotion.app build/export/Payload/
+          cd build/export && zip -r PitchMotion.ipa Payload
+      
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: PitchMotion.ipa
+          path: mobile/ios/build/export/PitchMotion.ipa
