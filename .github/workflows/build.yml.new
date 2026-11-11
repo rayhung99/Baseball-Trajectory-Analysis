@@ -1,0 +1,110 @@
+name: Build iOS App
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      
+      - name: Install CocoaPods
+        run: |
+          sudo gem install cocoapods
+      
+      - name: Install dependencies
+        run: |
+          cd mobile
+          npm ci
+          npx expo prebuild --platform ios
+          cd ios && pod install && cd ..
+      
+      - name: Set up signing
+        run: |
+          # 建立暫存目錄放憑證
+          mkdir -p ~/signing
+          
+          # 解碼並放置簽名憑證
+          echo "${{ secrets.IOS_SIGNING_CERT }}" | base64 -D > ~/signing/cert.p12
+          echo "${{ secrets.IOS_PROVISIONING_PROFILE }}" | base64 -D > ~/signing/profile.mobileprovision
+          
+          # 安裝憑證到 keychain
+          security create-keychain -p "" build.keychain
+          security default-keychain -s build.keychain
+          security unlock-keychain -p "" build.keychain
+          security import ~/signing/cert.p12 -k build.keychain -P "${{ secrets.IOS_SIGNING_CERT_PASSWORD }}" -A
+          
+          # 複製 provisioning profile
+          mkdir -p ~/Library/MobileDevice/Provisioning\ Profiles
+          cp ~/signing/profile.mobileprovision ~/Library/MobileDevice/Provisioning\ Profiles/
+      
+      - name: Generate ExportOptions.plist
+        run: |
+          cd mobile/ios
+          security cms -D -i ~/signing/profile.mobileprovision > /tmp/profile.plist
+          python3 - <<'PYEOF'
+          import plistlib
+          with open('/tmp/profile.plist', 'rb') as f:
+              prof = plistlib.load(f)
+          name = prof['Name']
+          team = prof['TeamIdentifier'][0]
+          ent = prof.get('Entitlements', {})
+          app_id = ent.get('application-identifier', '')
+          bundle_id = app_id.split('.', 1)[1] if '.' in app_id else 'com.wenglien.speedgun.mobile'
+          if prof.get('ProvisionsAllDevices'):
+              method = 'enterprise'
+          elif 'ProvisionedDevices' in prof:
+              method = 'ad-hoc'
+          elif ent.get('get-task-allow'):
+              method = 'development'
+          else:
+              method = 'app-store-connect'
+          opts = {
+              'method': method,
+              'teamId': team,
+              'provisioningProfiles': {bundle_id: name},
+          }
+          with open('ExportOptions.plist', 'wb') as f:
+              plistlib.dump(opts, f)
+          print('method:', method)
+          print('teamId:', team)
+          print('profile:', name)
+          print('bundleId:', bundle_id)
+          PYEOF
+      
+      - name: Build with xcodebuild
+        run: |
+          cd mobile/ios
+          xcodebuild \
+            -workspace PitchMotion.xcworkspace \
+            -scheme PitchMotion \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath build \
+            -archivePath build/PitchMotion.xcarchive \
+            archive
+      
+      - name: Export IPA
+        run: |
+          cd mobile/ios
+          xcodebuild \
+            -exportArchive \
+            -archivePath build/PitchMotion.xcarchive \
+            -exportPath build/export \
+            -exportOptionsPlist ExportOptions.plist
+      
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: PitchMotion.ipa
+          path: mobile/ios/build/export/PitchMotion.ipa
